@@ -1,0 +1,35 @@
+# 의존성
+node_modules/
+
+# 빌드 결과물
+dist/
+out/
+*.vsix
+
+# 환경변수 / 시크릿
+.env
+.env.local
+.env.*
+!.env.example
+
+# VS Code 설정 (개인 설정은 제외)
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# OS 파일
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 로그
+*.log
+npm-debug.log*
+
+# 패키지 잠금파일 (선택: 팀 프로젝트면 지우기)
+# package-lock.json
+
+# 테스트 커버리지
+coverage/
+.nyc_output/
