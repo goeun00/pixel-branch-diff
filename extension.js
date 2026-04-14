@@ -7,6 +7,10 @@ const execAsync = util.promisify(exec);
 
 let _isGitRepo = null;
 let _refreshTimer = null;
+let _state = {
+  mode: "compareBase",
+  baseBranch: null,
+};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -327,10 +331,13 @@ class PixelBranchDiffProvider {
 
     webviewView.webview.onDidReceiveMessage(async (msg) => {
       const cwd = getCwd();
-      const config = vscode.workspace.getConfiguration("pixelBranchDiff");
-      const mode = config.get("mode", "compareBase");
-      let baseBranch = config.get("baseBranch");
-      if (!baseBranch) baseBranch = await getDefaultBranch(cwd);
+      let mode = _state.mode;
+      let baseBranch = _state.baseBranch;
+
+      if (!baseBranch && cwd) {
+        baseBranch = await getDefaultBranch(cwd);
+        _state.baseBranch = baseBranch;
+      }
 
       if (msg.type === "ready" || msg.type === "refresh") {
         if (this._view) this._view.webview.postMessage({ type: "loading" });
@@ -415,21 +422,13 @@ class PixelBranchDiffProvider {
 
         if (picked !== undefined) {
           if (this._view) this._view.webview.postMessage({ type: "loading" });
-          await config.update(
-            "baseBranch",
-            picked,
-            vscode.ConfigurationTarget.Workspace,
-          );
+          _state.baseBranch = picked;
           await this._sendData(cwd, mode, picked);
         }
       } else if (msg.type === "toggleMode") {
         const newMode = mode === "compareBase" ? "workingTree" : "compareBase";
         if (this._view) this._view.webview.postMessage({ type: "loading" });
-        await config.update(
-          "mode",
-          newMode,
-          vscode.ConfigurationTarget.Workspace,
-        );
+        _state.mode = newMode;
         await this._sendData(cwd, newMode, baseBranch);
       }
     });
@@ -459,16 +458,16 @@ class PixelBranchDiffProvider {
   async refresh() {
     if (!this._view) return;
     const cwd = getCwd();
-    const config = vscode.workspace.getConfiguration("pixelBranchDiff");
+
+    if (!_state.baseBranch && cwd) {
+      const detectedBase = await getDefaultBranch(cwd);
+      if (detectedBase) _state.baseBranch = detectedBase;
+    }
+
     this._view.webview.postMessage({ type: "loading" });
-    await this._sendData(
-      cwd,
-      config.get("mode", "compareBase"),
-      config.get("baseBranch", "main"),
-    );
+    await this._sendData(cwd, _state.mode, _state.baseBranch);
   }
 }
-
 // ── HTML Builder ──────────────────────────────────────────────────────────────
 
 function buildHtml(webview, extensionUri) {
@@ -488,9 +487,11 @@ function buildHtml(webview, extensionUri) {
     "  --ins:var(--vscode-diffEditor-insertedLineBackground,rgba(0,200,80,.15));",
     "  --del:var(--vscode-diffEditor-removedLineBackground,rgba(200,50,50,.15));",
     "  --hover:var(--vscode-list-hoverBackground,rgba(255,255,255,.05));",
-    "  --badge:var(--vscode-badge-background,#4d4d4d);",
-    "  --badge-fg:var(--vscode-badge-foreground,#ccc);",
     "  --accent:var(--vscode-textLink-foreground,#4fc1ff);",
+    "  --c-add:var(--vscode-gitDecoration-addedResourceForeground,#4ade80);",
+    "  --c-del:var(--vscode-gitDecoration-deletedResourceForeground,#f87171);",
+    "  --c-mod:var(--vscode-gitDecoration-modifiedResourceForeground,#e6b432);",
+    "  --c-ren:#9b91e8;",
     '  --mono:var(--vscode-editor-font-family,"Courier New",monospace);',
     "  --ui:var(--vscode-font-family,sans-serif);",
     "  --fs:var(--vscode-font-size,12px);",
@@ -507,7 +508,9 @@ function buildHtml(webview, extensionUri) {
     ".btn .ico{font-size:10px;line-height:1;opacity:.9}",
     "#toolbar{padding:5px 8px 4px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:5px;flex-shrink:0}",
     "#branch-row{display:flex;align-items:center;gap:5px;font-size:10px;font-family:var(--mono);flex-wrap:wrap}",
-    ".tag{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;background:var(--badge);color:var(--badge-fg);border-radius:var(--r);font-size:10px;font-family:var(--mono);border:1px solid var(--border)}",
+    ".tag{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;color:var(--accent);border-radius:var(--r);font-size:10px;font-family:var(--mono);background:color-mix(in srgb,currentColor 12%,transparent);border:1px solid color-mix(in srgb,currentColor 35%,transparent);font-weight:700}",
+    ".tag-base{display:inline-flex;align-items:center;gap:4px;padding:1px 6px;background:transparent;color:var(--fg);border-radius:var(--r);font-size:10px;font-family:var(--mono);border:1px dashed var(--border);cursor:pointer;opacity:.75;transition:opacity .1s,border-color .1s,color .1s}",
+    ".tag-base:hover{opacity:1;border-color:var(--accent);color:var(--accent)}",
     "#pills{display:flex;flex-wrap:wrap;gap:3px}",
     "#action-row{display:flex;gap:4px;align-items:center;flex-wrap:wrap}",
     "#mascot{padding:6px 8px 4px;display:flex;align-items:center;gap:7px;border-bottom:1px solid var(--border);flex-shrink:0;position:relative;overflow:hidden}",
@@ -524,45 +527,51 @@ function buildHtml(webview, extensionUri) {
     ".fi:hover{background:var(--hover)}",
     ".fi.sel{background:var(--hover);border-left-color:var(--accent)}",
     ".fi-top{display:flex;align-items:center;gap:4px;min-width:0}",
-    ".sbadge{font-size:10px;font-family:var(--mono);font-weight:900;padding:0 4px;border-radius:2px;flex-shrink:0;line-height:14px;height:14px;display:inline-flex;align-items:center}",
-    ".s-M{background:rgba(230,180,50,.25);color:#e6b432;border:1px solid rgba(230,180,50,.4)}",
-    ".s-A{background:rgba(80,220,120,.2);color:#50dc78;border:1px solid rgba(80,220,120,.3)}",
-    ".s-D{background:rgba(220,80,80,.2);color:#dc5050;border:1px solid rgba(220,80,80,.3)}",
-    ".s-R{background:rgba(130,120,230,.2);color:#9b91e8;border:1px solid rgba(130,120,230,.3)}",
+    ".sbadge{font-size:10px;font-family:var(--mono);font-weight:900;padding:0 4px;border-radius:2px;flex-shrink:0;line-height:14px;height:14px;display:inline-flex;align-items:center;background:color-mix(in srgb,currentColor 15%,transparent);border:1px solid color-mix(in srgb,currentColor 35%,transparent)}",
+    ".s-M{color:var(--c-mod)}",
+    ".s-A{color:var(--c-add)}",
+    ".s-D{color:var(--c-del)}",
+    ".s-R{color:var(--c-ren)}",
     ".fname{font-size:11px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}",
     ".fdir{font-size:10px;opacity:.5;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:2px}",
-    ".fdir--rename{color:#9b91e8;opacity:1}",
     ".cat{font-size:10px;padding:0 4px;border-radius:2px;font-family:var(--mono);border:1px solid var(--border);opacity:.6;text-transform:uppercase;line-height:13px;flex-shrink:0}",
     ".fi-actions{display:none;gap:4px;align-items:center;margin-top:1px;padding-left:2px;flex-wrap:wrap}",
     ".fi:hover .fi-actions,.fi.sel .fi-actions{display:flex}",
     "#diff-panel{display:none;flex-direction:column;flex:1;min-width:0;min-height:0}",
     "#main.diff-open #diff-panel{display:flex}",
     "#diff-header{padding:5px 8px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;flex-shrink:0;flex-wrap:wrap}",
-    ".dlb{font-size:10px;font-family:var(--mono);text-transform:uppercase;padding:1px 5px;border-radius:2px;color:#dc5050;border:1px solid rgba(220,80,80,.4);background:rgba(220,80,80,.1)}",
-    ".dlh{font-size:10px;font-family:var(--mono);text-transform:uppercase;padding:1px 5px;border-radius:2px;color:#50dc78;border:1px solid rgba(80,220,120,.35);background:rgba(80,220,120,.1)}",
-    "#diff-fname{font-size:10px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;opacity:.8;min-width:0}",
+    ".dh-status{font-size:10px;font-family:var(--mono);text-transform:uppercase;padding:1px 5px;border-radius:2px;flex-shrink:0;background:color-mix(in srgb,currentColor 15%,transparent);border:1px solid color-mix(in srgb,currentColor 35%,transparent)}",
+    ".dh-status-M{color:var(--c-mod)}",
+    ".dh-status-A{color:var(--c-add)}",
+    ".dh-status-D{color:var(--c-del)}",
+    ".dh-status-R{color:var(--c-ren)}",
+    ".dh-counts{display:flex;gap:4px;font-size:10px;font-family:var(--mono)}",
+    ".dh-add{color:var(--c-add)}",
+    ".dh-del{color:var(--c-del)}",
+    ".rename-box{display:flex;align-items:stretch;margin:0 8px 6px;border:1px solid var(--border);border-radius:var(--r);overflow:hidden;font-size:10px;font-family:var(--mono)}",
+    ".rename-side{flex:1;padding:4px 7px;min-width:0}",
+    ".rename-side--from{border-right:1px solid var(--border)}",
+    ".rename-label{font-size:9px;opacity:.5;margin-bottom:2px}",
+    ".rename-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+    ".rename-dir{display:none}",
+    ".rename-name--del{color:var(--c-del);text-decoration:line-through;opacity:.8}",
+    ".rename-name--add{color:var(--c-add);font-weight:700}",
+    ".rename-arrow{display:flex;align-items:center;padding:0 5px;opacity:.35;font-size:11px;flex-shrink:0}",
     "#diff-scroll{flex:1;overflow:auto}",
     "#diff-scroll::-webkit-scrollbar{width:5px;height:5px}",
     "#diff-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}",
     "#diff-scroll::-webkit-scrollbar-corner{background:transparent}",
-    ".diff-meta{padding:8px 10px;border-bottom:1px solid var(--border);font-family:var(--mono)}",
-    ".diff-meta__file{font-size:12px;font-weight:600}",
-    ".diff-meta__dir{margin-top:2px;font-size:10px;opacity:.5}",
-    ".diff-meta__stat{display:flex;gap:6px;align-items:center;margin-top:6px;font-size:10px}",
-    ".diff-meta__status{opacity:.7;letter-spacing:.3px}",
-    ".diff-meta__count--add{color:#4ade80}",
-    ".diff-meta__count--del{color:#f87171}",
     ".d-info{padding:20px 12px;font-size:11px;font-family:var(--mono);opacity:.7;text-align:center}",
-    ".d-err{color:#dc5050}",
+    ".d-err{color:var(--c-del)}",
     ".dt{border-collapse:collapse;table-layout:auto;min-width:100%}",
     '.dt td{vertical-align:top;padding:0 6px;white-space:pre;font-size:11px;font-family:var(--mono,"Courier New",monospace)}',
     ".dt .ln{width:32px;min-width:32px;text-align:right;opacity:.35;user-select:none;padding-right:5px;padding-left:4px;border-right:1px solid var(--border);font-size:10px;white-space:nowrap!important}",
     ".dt tr.ins td{background:var(--ins)}",
     ".dt tr.del td{background:var(--del)}",
-    ".dt tr.hunk td{background:rgba(127,127,255,.08);color:var(--accent);font-size:10px;padding:1px 8px;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}",
+    ".dt tr.hunk td{background:color-mix(in srgb,var(--accent) 8%,transparent);color:var(--accent);font-size:10px;padding:1px 8px;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}",
     ".dsign{width:14px;min-width:14px;text-align:center;padding:0 2px;user-select:none;white-space:nowrap!important}",
-    "tr.ins .dsign{color:#50dc78}",
-    "tr.del .dsign{color:#dc5050}",
+    "tr.ins .dsign{color:var(--c-add)}",
+    "tr.del .dsign{color:var(--c-del)}",
     ".dt.wrap{min-width:unset;width:100%}",
     ".dt.wrap td:last-child{white-space:pre-wrap!important;word-break:break-all;overflow-wrap:anywhere}",
     "#empty-state{padding:24px 12px;text-align:center;font-size:11px;font-family:var(--mono);opacity:.6;line-height:1.8}",
@@ -609,7 +618,7 @@ function buildHtml(webview, extensionUri) {
     '    <button class="btn ghost sm" id="btn-mode" title="Toggle: compare branch vs working tree changes"><span class="ico">&#x21CC;</span>BRANCH</button>\n' +
     '    <span class="tag" id="t-branch">...</span>\n' +
     '    <span style="opacity:.4;font-size:10px" id="vs-sep">vs</span>\n' +
-    '    <span class="tag" id="t-base" style="cursor:pointer" title="Click to change base branch">main</span>\n' +
+    '    <span class="tag-base" id="t-base" title="Click to change base branch">&#x270E; main</span>\n' +
     "  </div>\n" +
     '<div id="mascot">\n' +
     MASCOT +
@@ -626,13 +635,13 @@ function buildHtml(webview, extensionUri) {
     '  <div id="file-panel"><div id="file-scroll"><div id="file-list"></div></div></div>\n' +
     '  <div id="diff-panel">\n' +
     '    <div id="diff-header">\n' +
-    '      <span class="dlb">BASE</span>\n' +
-    '      <span style="opacity:.4;font-size:10px">&#8594;</span>\n' +
-    '      <span class="dlh">HEAD</span>\n' +
-    '      <span id="diff-fname"></span>\n' +
+    '      <span id="dh-status" class="dh-status dh-status-M">MODIFIED</span>\n' +
+    '      <span class="dh-counts"><span id="dh-add" class="dh-add">+0</span><span id="dh-del" class="dh-del">-0</span></span>\n' +
+    '      <div style="flex:1"></div>\n' +
     '      <button class="btn ghost sm" id="btn-wrap" title="Toggle line wrap">WRAP</button>\n' +
-    '      <button class="btn ghost sm" id="btn-close"><span class="ico">&#x2715;</span><span>Close</span></button>\n' +
+    '      <button class="btn ghost sm" id="btn-close"><span class="ico">&#x2715;</span></button>\n' +
     "    </div>\n" +
+    '    <div id="rename-row" style="display:none"></div>\n' +
     '    <div id="diff-scroll"><div id="diff-body"></div></div>\n' +
     "  </div>\n" +
     "</div>\n" +

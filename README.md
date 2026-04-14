@@ -1,156 +1,120 @@
-# ⬛ Pixel Branch Diff Explorer
+# Pixel Branch Diff
 
-> A cute retro pixel UI for exploring git branch changes — right inside the VS Code Explorer panel.
+> 픽셀아트 감성의 Git diff 사이드바 패널 — 변경된 파일을 VS Code 안에서 바로 확인하세요.
 
----
+![VS Code](https://img.shields.io/badge/VS%20Code-1.70%2B-blue?style=flat-square&logo=visualstudiocode)
+![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
 
-## ✨ Features
-
-- **Explorer panel integration** — lives at the bottom of your Explorer sidebar, always visible
-- **Two diff modes** — compare vs a base branch (`main`) or view working tree changes
-- **Inline diff viewer** — GitHub-style side-annotated diff rendered inside the webview (no new tabs!)
-- **Extension filter pills** — filter files by `ASTRO`, `JS`, `CSS`, `SVG`, `IMG`, `ETC`
-- **File actions** — `OPEN`, `DIFF`, `PIN` on every file
-- **Retro pixel UI** — chunky borders, pixel mascot, dot-grid accent, theme-aware colors
-- **Smart error handling** — handles deleted, renamed, added, and missing files gracefully
-- **Auto-refresh** — watches `.git/index` for changes
+Pixel Branch Diff는 현재 브랜치에서 변경된 파일을 사이드바에 항상 표시해주는 패널입니다. 인라인 diff, 파일 상태 배지, VS Code 기본 diff 에디터 연동까지 — 터미널 없이, 컨텍스트 전환 없이, 한눈에 확인할 수 있습니다.
 
 ---
 
-## 🚀 Getting Started
+## 주요 기능
 
-### Install from source
+### 🌿 브랜치 비교 모드
 
-```bash
-git clone <this-repo>
-cd pixel-branch-diff-explorer
-npm install   # no runtime deps — just devDependencies for linting
-```
+현재 브랜치를 기준 브랜치(예: `main`, `develop`)와 비교합니다. 시작 시 레포의 기본 브랜치를 자동으로 감지합니다.
 
-Open in VS Code:
+### 🌲 로컬 모드
 
-```bash
-code .
-```
+스테이징되지 않은 변경사항을 확인합니다. `git status` + `git diff`를 시각화한 모드입니다.
 
-Press **F5** to launch the Extension Development Host.
+### 📄 인라인 diff 패널
 
----
+파일을 클릭하면 사이드바 안에서 바로 unified diff를 확인할 수 있습니다. 새 탭 없이, 깔끔하게.
 
-## 🎛 Commands
+### 🖊️ 에디터 diff 열기
 
-| Command | Description |
-|---|---|
-| `Pixel Diff: Refresh` | Re-run git and reload the file list |
-| `Pixel Diff: Set Base Branch` | Change the base branch (default: `main`) |
-| `Pixel Diff: Toggle Mode` | Switch between `compareBase` and `workingTree` |
+클릭 한 번으로 VS Code 기본 diff 에디터를 열어 기준 ref와 좌우로 비교할 수 있습니다.
 
-All commands are available via the Command Palette (`Ctrl/Cmd + Shift + P`).
+### 🏷️ 파일 상태 배지
 
-The **↺ SYNC** button and **⇄ MODE** button in the panel header also trigger these.
+모든 파일에 Git 상태가 표시됩니다:
 
----
+| 배지 | 의미        |
+| ---- | ----------- |
+| `M`  | 수정됨      |
+| `A`  | 추가됨      |
+| `D`  | 삭제됨      |
+| `R`  | 이름 변경됨 |
 
-## ⚙️ Configuration
+### 📁 파일 타입 카테고리
 
-| Setting | Default | Description |
-|---|---|---|
-| `pixelBranchDiff.baseBranch` | `"main"` | Base branch to compare against |
-| `pixelBranchDiff.mode` | `"compareBase"` | `"compareBase"` or `"workingTree"` |
+`JSX`, `JS`, `CSS`, `MARKUP`, `IMG`, `ETC` 카테고리로 분류되어 어떤 종류의 변경인지 한눈에 파악할 수 있습니다.
 
-Set these in your workspace's `.vscode/settings.json`:
+### 🔀 베이스 브랜치 변경
 
-```json
-{
-  "pixelBranchDiff.baseBranch": "develop",
-  "pixelBranchDiff.mode": "compareBase"
-}
-```
+툴바의 베이스 브랜치 태그를 클릭하면 로컬 브랜치 중 하나를 비교 기준으로 선택할 수 있습니다. 최근에 체크아웃한 브랜치가 우선 표시됩니다.
+
+### ⚡ 자동 새로고침
+
+Git 인덱스가 변경되면 패널이 자동으로 갱신됩니다. 수동 새로고침 불필요.
 
 ---
 
-## 🎨 UI Overview
+## 시작하기
 
-```
-┌─────────────────────────────────────────────────┐
-│ ON [branch-name]  vs branch  vs [main]  ⇄ ↺    │ ← toolbar
-│ [ALL][ASTRO][JS][CSS][SVG][IMG][ETC]            │ ← filter pills
-├────────────────────────────────────────────────┤
-│ 🟦 pixel mascot   tracking changes…  3 files   │ ← mascot bar
-├──────────────────┬─────────────────────────────┤
-│ ~ src/index.js   │ BASE → HEAD                 │
-│   ↗ OPEN ≠ DIFF │ @@ -12 +14 @@               │
-│ + styles/new.css │   function foo() {           │
-│ ✕ old/gone.ts   │ - return null;               │
-│                  │ + return true;               │
-│                  │ }                            │
-└──────────────────┴─────────────────────────────┘
-```
-
-- **Left panel**: filter pills + mascot + scrollable file list
-- **Right panel**: inline diff with line numbers, `+` / `-` signs, and colored rows
+1. VS Code 마켓플레이스에서 익스텐션 설치
+2. Git 레포지토리가 있는 폴더를 VS Code로 열기
+3. 탐색기 사이드바에서 **Pixel Branch Diff** 패널 확인
+4. 기본 브랜치 대비 변경 파일이 자동으로 로드됩니다
 
 ---
 
-## 🔧 Git Commands Used
+## 사용법
 
-**compareBase mode:**
-```bash
-git diff --name-status <base>...HEAD
-git show <base>:<file>
-git show HEAD:<file>
-```
+### 모드 전환
 
-**workingTree mode:**
-```bash
-git status --porcelain
-git show HEAD:<file>
-cat <file>   # for untracked files
-```
+툴바의 **`⇌ BRANCH`** 버튼을 클릭해 모드를 전환하세요:
 
----
+- **BRANCH** — 기준 브랜치와의 차이 (`git diff main...HEAD`)
+- **LOCAL** — 커밋되지 않은 변경사항 (`git status` / `git diff`)
 
-## 📁 File Structure
+### 베이스 브랜치 변경
 
-```
-pixel-branch-diff-explorer/
-├── extension.js      # Main extension + WebviewViewProvider + git logic
-├── package.json      # Extension manifest
-└── README.md         # This file
-```
+툴바의 점선 태그(예: `✎ main`)를 클릭하면 로컬 브랜치 목록이 나타납니다. 최근 체크아웃 순으로 정렬됩니다.
 
-No bundler. No React. No external runtime dependencies. Pure vanilla JS webview.
+### diff 보기
+
+파일 목록에서 파일을 클릭하면 오른쪽에 인라인 diff 패널이 열립니다. **WRAP** 버튼으로 긴 줄 줄바꿈을 토글할 수 있습니다.
+
+### 에디터에서 열기
+
+파일에 마우스를 올리면 액션 버튼이 나타납니다:
+
+- **OPEN** — 에디터에서 파일 열기
+- **DIFF** — VS Code 기본 diff 에디터로 좌우 비교 보기
 
 ---
 
-## 🐛 Error Handling
+## 명령어
 
-The extension handles:
-- Not a git repo → shows error message in panel
-- No workspace open → friendly prompt
-- Deleted files → shows base content only
-- Renamed files → diffs old path vs new path
-- New/untracked files → shows head content only
-- Missing files → shows partial diff with error note
-- Binary files → shows "No textual changes" notice
+| 명령어                               | 설명                         |
+| ------------------------------------ | ---------------------------- |
+| `Pixel Branch Diff: Refresh`         | 파일 목록 수동 새로고침      |
+| `Pixel Branch Diff: Set Base Branch` | 비교 기준 브랜치 변경        |
+| `Pixel Branch Diff: Toggle Mode`     | 브랜치 비교 ↔ 워킹 트리 전환 |
 
 ---
 
-## 🎨 Theme Support
+## 요구 사항
 
-All colors use VS Code theme tokens — works with any light or dark theme:
-
-- `--vscode-editor-background / foreground`
-- `--vscode-panel-border`
-- `--vscode-button-background / foreground`
-- `--vscode-textLink-foreground` (accent)
-- `--vscode-diffEditor-insertedLineBackground`
-- `--vscode-diffEditor-removedLineBackground`
-- `--vscode-badge-background / foreground`
-- `--vscode-list-hoverBackground`
+- VS Code 1.70 이상
+- Git 레포지토리가 있는 워크스페이스
 
 ---
 
-## 📜 License
+## 익스텐션 설정
 
-MIT
+| 설정                         | 기본값        | 설명                                        |
+| ---------------------------- | ------------- | ------------------------------------------- |
+| `pixelBranchDiff.baseBranch` | 자동 감지     | 비교 기준 브랜치                            |
+| `pixelBranchDiff.mode`       | `compareBase` | 기본 모드: `compareBase` 또는 `workingTree` |
+
+---
+
+## 팁
+
+- 패널을 숨겼다가 다시 열어도 상태가 유지됩니다 — 데이터를 다시 불러오지 않아요
+- 이름이 변경된 파일은 diff 헤더에 `이전 경로 → 새 경로` 형태로 표시됩니다
+- 이미지 파일(`.png`, `.jpg`, `.webp` 등)은 diff 대신 VS Code 이미지 미리보기로 열립니다

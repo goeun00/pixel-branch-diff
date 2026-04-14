@@ -13,9 +13,7 @@
   };
 
   function getCategoryCounts(files) {
-    var counts = {
-      ALL: files.length,
-    };
+    var counts = { ALL: files.length };
     files.forEach(function (f) {
       var cat = f.category || "ETC";
       counts[cat] = (counts[cat] || 0) + 1;
@@ -26,19 +24,6 @@
   var wrapOn = false;
   var pillsEl = document.getElementById("pills");
   var PILLS = ["ALL", "MARKUP", "JS", "JSX", "CSS", "IMG", "ETC"];
-
-  function getCategoryCounts(files) {
-    var counts = {
-      ALL: files.length,
-    };
-
-    files.forEach(function (f) {
-      var cat = f.category || "ETC";
-      counts[cat] = (counts[cat] || 0) + 1;
-    });
-
-    return counts;
-  }
 
   function renderPills() {
     var counts = getCategoryCounts(state.files || []);
@@ -212,15 +197,11 @@
     state.diffOpen = true;
     document.getElementById("main").classList.add("diff-open");
 
-    if (f.status === "R" && f.oldPath) {
-      document.getElementById("diff-fname").textContent =
-        f.oldPath + " → " + f.filePath;
-    } else {
-      document.getElementById("diff-fname").textContent = f.filePath;
-    }
-
     document.getElementById("diff-body").innerHTML =
       '<div class="d-info"><span class="spin"></span> loading...</div>';
+
+    var renameRow = document.getElementById("rename-row");
+    if (renameRow) renameRow.style.display = "none";
 
     renderFiles();
 
@@ -233,19 +214,16 @@
   }
   function renderUnifiedDiff(diffText) {
     var body = document.getElementById("diff-body");
-
     if (!body) return;
 
     var selected = state.sel || {};
     var filePath = selected.filePath || "";
-    var fileName = filePath ? filePath.split("/").pop() : "";
-    var dir = filePath ? filePath.split("/").slice(0, -1).join("/") : "";
+    var oldPath = selected.oldPath || "";
     var status = selected.status || "M";
 
     var lines = diffText ? diffText.split("\n") : [];
     var addCount = 0;
     var delCount = 0;
-
     lines.forEach(function (line) {
       if (line.startsWith("+") && !line.startsWith("+++")) addCount += 1;
       if (line.startsWith("-") && !line.startsWith("---")) delCount += 1;
@@ -281,41 +259,73 @@
           ? "DELETED"
           : status === "R"
             ? isModified
-              ? "RENAMED + MODIFIED"
+              ? "RENAMED+MOD"
               : "RENAMED"
             : "MODIFIED";
 
-    var headerHtml =
-      '<div class="diff-meta">' +
-      '<div class="diff-meta__file">' +
-      esc(fileName) +
-      "</div>" +
-      '<div class="diff-meta__dir">' +
-      esc(dir) +
-      "</div>" +
-      '<div class="diff-meta__stat">' +
-      '<span class="diff-meta__status">' +
-      statusText +
-      "</span>" +
-      '<span class="diff-meta__count diff-meta__count--add">+' +
-      addCount +
-      "</span>" +
-      '<span class="diff-meta__count diff-meta__count--del">-' +
-      delCount +
-      "</span>" +
-      "</div>" +
-      "</div>";
+    var statusCls =
+      "dh-status dh-status-" +
+      (status === "R"
+        ? "R"
+        : status === "A"
+          ? "A"
+          : status === "D"
+            ? "D"
+            : "M");
+
+    var dhStatus = document.getElementById("dh-status");
+    var dhAdd = document.getElementById("dh-add");
+    var dhDel = document.getElementById("dh-del");
+    var renameRow = document.getElementById("rename-row");
+
+    if (dhStatus) {
+      dhStatus.textContent = statusText;
+      dhStatus.className = statusCls;
+    }
+    if (dhAdd) dhAdd.textContent = "+" + addCount;
+    if (dhDel) dhDel.textContent = "-" + delCount;
+
+    if (status === "R" && renameRow) {
+      var fromDir = oldPath ? oldPath.split("/").slice(0, -1).join("/") : "";
+      var fromName = oldPath ? oldPath.split("/").pop() : "";
+      var toDir = filePath.split("/").slice(0, -1).join("/");
+      var toName = filePath.split("/").pop();
+      renameRow.style.display = "";
+      renameRow.innerHTML =
+        '<div class="rename-box">' +
+        '<div class="rename-side rename-side--from">' +
+        '<div class="rename-label">FROM</div>' +
+        '<div class="rename-path"><span class="rename-dir">' +
+        esc(fromDir ? fromDir + "/" : "") +
+        "</span>" +
+        '<span class="rename-name--del">' +
+        esc(fromName) +
+        "</span></div>" +
+        "</div>" +
+        '<div class="rename-arrow">&#8594;</div>' +
+        '<div class="rename-side">' +
+        '<div class="rename-label">TO</div>' +
+        '<div class="rename-path"><span class="rename-dir">' +
+        esc(toDir ? toDir + "/" : "") +
+        "</span>" +
+        '<span class="rename-name--add">' +
+        esc(toName) +
+        "</span></div>" +
+        "</div>" +
+        "</div>";
+    } else if (renameRow) {
+      renameRow.style.display = "none";
+      renameRow.innerHTML = "";
+    }
 
     if (status === "R" && !hasVisibleDiff) {
       body.innerHTML =
-        headerHtml +
-        '<div class="d-info">📦 File renamed without changes.</div>';
+        '<div class="d-info">File renamed without changes.</div>';
       return;
     }
 
     if (!diffText) {
       body.innerHTML =
-        headerHtml +
         '<div class="d-info" style="opacity:.5">No text diff. Rename, image, or metadata-only change.</div>';
       return;
     }
@@ -333,18 +343,15 @@
         line.startsWith("rename to ") ||
         line.startsWith("--- ") ||
         line.startsWith("+++ ")
-      ) {
+      )
         return;
-      }
 
       if (line.startsWith("@@")) {
         var match = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-
         if (match) {
           baseLine = parseInt(match[1], 10);
           headLine = parseInt(match[2], 10);
         }
-
         html +=
           '<tr class="hunk"><td class="ln" colspan="4">' +
           esc(line) +
@@ -394,12 +401,10 @@
     });
 
     html += "</tbody></table>";
-    body.innerHTML = headerHtml + html;
+    body.innerHTML = html;
 
     var table = document.querySelector("#diff-body .dt");
-    if (table) {
-      table.classList.toggle("wrap", wrapOn);
-    }
+    if (table) table.classList.toggle("wrap", wrapOn);
   }
   function getMessage(files) {
     const total = files.length;
@@ -434,7 +439,7 @@
             ? '<span class="ico">&#x21CC;</span><span>BRANCH</span>'
             : '<span class="ico">&#x21CC;</span><span>LOCAL</span>';
       }
-      document.getElementById("t-base").textContent = state.base;
+      document.getElementById("t-base").textContent = "\u270E " + state.base;
       document.getElementById("vs-sep").style.display =
         state.mode === "compareBase" ? "" : "none";
       document.getElementById("t-base").style.display =

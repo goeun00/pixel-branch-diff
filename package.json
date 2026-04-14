@@ -6,6 +6,7 @@
   "engines": {
     "vscode": "^1.85.0"
   },
+  "publisher": "goeun",
   "categories": [
     "SCM Providers",
     "Visualization"
@@ -27,7 +28,7 @@
         {
           "type": "webview",
           "id": "pixelBranchDiff.explorerView",
-          "name": "⬛ Pixel Branch Diff",
+          "name": "🐰Pixel Branch Diff",
           "when": "true"
         }
       ]
@@ -51,29 +52,10 @@
       "view/title": [
         {
           "command": "pixelBranchDiff.refresh",
-"when": "view == pixelBranchDiff.explorerView",
+          "when": "view == pixelBranchDiff.explorerView",
           "group": "navigation"
         }
       ]
-    },
-    "configuration": {
-      "title": "Pixel Branch Diff",
-      "properties": {
-        "pixelBranchDiff.baseBranch": {
-          "type": "string",
-          "default": "main",
-          "description": "Base branch to compare against (compareBase mode)"
-        },
-        "pixelBranchDiff.mode": {
-          "type": "string",
-          "enum": [
-            "compareBase",
-            "workingTree"
-          ],
-          "default": "compareBase",
-          "description": "Diff mode: compareBase or workingTree"
-        }
-      }
     }
   },
   "scripts": {
