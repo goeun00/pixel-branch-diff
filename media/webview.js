@@ -4,10 +4,13 @@
   var state = {
     files: [],
     filter: "ALL",
+    searchText: "",
+    selectedFiles: [],
     sel: null,
     mode: "compareBase",
     base: "main",
     branch: "...",
+    localTarget: "HEAD",
     diffOpen: false,
     error: null,
   };
@@ -19,6 +22,45 @@
       counts[cat] = (counts[cat] || 0) + 1;
     });
     return counts;
+  }
+
+  function getFilteredFiles() {
+    return state.files.filter(function (f) {
+      // 카테고리 필터
+      var categoryMatch = state.filter === "ALL" || f.category === state.filter;
+
+      // 검색어 필터
+      var searchMatch = true;
+      if (state.searchText) {
+        var fileName = f.filePath.toLowerCase();
+        searchMatch = fileName.indexOf(state.searchText) !== -1;
+      }
+
+      return categoryMatch && searchMatch;
+    });
+  }
+
+  function highlightText(text, searchText) {
+    if (!searchText) return esc(text);
+
+    var lowerText = text.toLowerCase();
+    var lowerSearch = searchText.toLowerCase();
+    var result = "";
+    var lastIndex = 0;
+    var index = lowerText.indexOf(lowerSearch);
+
+    while (index !== -1) {
+      result += esc(text.substring(lastIndex, index));
+      result +=
+        "<mark>" +
+        esc(text.substring(index, index + searchText.length)) +
+        "</mark>";
+      lastIndex = index + searchText.length;
+      index = lowerText.indexOf(lowerSearch, lastIndex);
+    }
+
+    result += esc(text.substring(lastIndex));
+    return result;
   }
 
   var wrapOn = false;
@@ -62,6 +104,46 @@
     vscode.postMessage({ type: "setBaseBranch" });
   };
 
+  document.getElementById("t-local-target").onclick = function () {
+    vscode.postMessage({ type: "setLocalTarget" });
+  };
+
+  document.getElementById("search-input").oninput = function (e) {
+    state.searchText = e.target.value.toLowerCase();
+    renderFiles();
+  };
+
+  document.getElementById("select-all").onchange = function (e) {
+    var filtered = getFilteredFiles();
+
+    if (e.target.checked) {
+      // 전체 선택
+      filtered.forEach(function (f) {
+        if (state.selectedFiles.indexOf(f.filePath) === -1) {
+          state.selectedFiles.push(f.filePath);
+        }
+      });
+    } else {
+      // 전체 해제 (필터된 파일만)
+      filtered.forEach(function (f) {
+        var idx = state.selectedFiles.indexOf(f.filePath);
+        if (idx !== -1) {
+          state.selectedFiles.splice(idx, 1);
+        }
+      });
+    }
+
+    renderFiles();
+  };
+
+  document.getElementById("btn-open-selected").onclick = function () {
+    if (!state.selectedFiles.length) return;
+
+    state.selectedFiles.forEach(function (filePath) {
+      vscode.postMessage({ type: "openFile", filePath: filePath });
+    });
+  };
+
   document.getElementById("btn-close").onclick = closeDiff;
 
   document.getElementById("btn-wrap").onclick = function () {
@@ -101,18 +183,25 @@
       return;
     }
 
-    var filtered = state.files.filter(function (f) {
-      return state.filter === "ALL" || f.category === state.filter;
-    });
+    var filtered = getFilteredFiles();
 
     if (!filtered.length) {
       var d = document.createElement("div");
       d.id = "empty-state";
-      d.innerHTML =
-        '<div style="font-size:22px;margin-bottom:8px">&#11035;</div>' +
-        (state.files.length
-          ? "No " + state.filter + " files changed."
-          : "No changes on this branch.");
+
+      if (state.searchText) {
+        d.innerHTML =
+          '<div style="font-size:22px;margin-bottom:8px">&#128269;</div>' +
+          'No files match "' +
+          esc(state.searchText) +
+          '"';
+      } else {
+        d.innerHTML =
+          '<div style="font-size:22px;margin-bottom:8px">&#11035;</div>' +
+          (state.files.length
+            ? "No " + state.filter + " files changed."
+            : "No changes on this branch.");
+      }
       list.appendChild(d);
       return;
     }
@@ -120,6 +209,7 @@
     filtered.forEach(function (f) {
       var item = document.createElement("div");
       var isSel = state.sel && state.sel.filePath === f.filePath;
+      var isChecked = state.selectedFiles.indexOf(f.filePath) !== -1;
       item.className = "fi" + (isSel ? " sel" : "");
 
       var basename = f.filePath.split("/").pop();
@@ -130,7 +220,20 @@
         renameText = f.oldPath + " → " + f.filePath;
       }
 
+      // 하이라이트 적용
+      var highlightedBasename = highlightText(basename, state.searchText);
+      var highlightedDir = highlightText(dir, state.searchText);
+      var highlightedRename = highlightText(renameText, state.searchText);
+
       item.innerHTML =
+        '<div class="fi-checkbox-wrapper">' +
+        '<input type="checkbox" class="file-checkbox" ' +
+        (isChecked ? "checked" : "") +
+        ' data-path="' +
+        esc(f.filePath) +
+        '" />' +
+        "</div>" +
+        '<div class="fi-content">' +
         '<div class="fi-top">' +
         '<span class="sbadge s-' +
         esc(f.status) +
@@ -140,24 +243,43 @@
         '<span class="fname" title="' +
         esc(f.filePath) +
         '">' +
-        esc(basename) +
+        highlightedBasename +
         "</span>" +
         '<span class="cat">' +
         esc(f.category) +
         "</span>" +
         "</div>" +
         (renameText
-          ? '<div class="fdir fdir--rename">' + esc(renameText) + "</div>"
+          ? '<div class="fdir fdir--rename">' + highlightedRename + "</div>"
           : dir
-            ? '<div class="fdir">' + esc(dir) + "</div>"
+            ? '<div class="fdir">' + highlightedDir + "</div>"
             : "") +
         '<div class="fi-actions">' +
         '<button class="btn ghost sm" data-a="diff"><span class="ico">&#8800;</span><span>Diff</span></button>' +
         '<button class="btn ghost sm" data-a="editorDiff"><span class="ico">&#x2197;</span><span>Editor</span></button>' +
+        "</div>" +
         "</div>";
 
+      // 체크박스 이벤트
+      var checkbox = item.querySelector(".file-checkbox");
+      checkbox.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        var path = this.dataset.path;
+        var idx = state.selectedFiles.indexOf(path);
+
+        if (this.checked && idx === -1) {
+          state.selectedFiles.push(path);
+        } else if (!this.checked && idx !== -1) {
+          state.selectedFiles.splice(idx, 1);
+        }
+      });
+
       item.addEventListener("click", function (ev) {
-        if (ev.target.closest("[data-a]")) return;
+        if (
+          ev.target.closest("[data-a]") ||
+          ev.target.closest(".file-checkbox")
+        )
+          return;
         vscode.postMessage({ type: "openFile", filePath: f.filePath });
       });
 
@@ -190,6 +312,26 @@
 
       list.appendChild(item);
     });
+
+    // 전체선택 체크박스 상태 및 카운트 업데이트
+    var selectAllCheckbox = document.getElementById("select-all");
+    var selectCountEl = document.getElementById("select-count");
+
+    if (selectAllCheckbox && filtered.length > 0) {
+      var selectedCount = filtered.filter(function (f) {
+        return state.selectedFiles.indexOf(f.filePath) !== -1;
+      }).length;
+
+      var allChecked = selectedCount === filtered.length;
+      selectAllCheckbox.checked = allChecked;
+
+      // 카운트 표시
+      if (selectCountEl) {
+        selectCountEl.textContent = selectedCount + "/" + filtered.length;
+      }
+    } else if (selectCountEl) {
+      selectCountEl.textContent = "";
+    }
   }
 
   function loadDiff(f) {
@@ -431,6 +573,8 @@
       state.mode = msg.mode || "compareBase";
       state.base = msg.baseBranch || "main";
       state.branch = msg.branch || "...";
+      state.localTarget = msg.localTarget || "HEAD";
+
       document.getElementById("t-branch").textContent = state.branch;
       var modeBtn = document.getElementById("btn-mode");
       if (modeBtn) {
@@ -440,10 +584,15 @@
             : '<span class="ico">&#x21CC;</span><span>LOCAL</span>';
       }
       document.getElementById("t-base").textContent = "\u270E " + state.base;
+      document.getElementById("t-local-target").textContent =
+        "\u270E " + state.localTarget;
+
       document.getElementById("vs-sep").style.display =
         state.mode === "compareBase" ? "" : "none";
       document.getElementById("t-base").style.display =
         state.mode === "compareBase" ? "" : "none";
+      document.getElementById("t-local-target").style.display =
+        state.mode === "workingTree" ? "" : "none";
 
       var n = state.files.length;
       document.getElementById("m-count").textContent =

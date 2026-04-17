@@ -10,6 +10,7 @@ let _refreshTimer = null;
 let _state = {
   mode: "compareBase",
   baseBranch: null,
+  localCompareTarget: "HEAD", // LOCAL 모드에서 비교할 대상
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -103,7 +104,55 @@ async function getCurrentBranch(cwd) {
   return r.ok ? r.out : "(unknown)";
 }
 
-async function getChangedFiles(cwd, mode, baseBranch) {
+async function getFileStatusVsBranch(cwd, filePath, targetBranch) {
+  // 1. 파일이 target 브랜치에 있는지 확인
+  const checkFile = await run(
+    `git cat-file -e ${targetBranch}:"${filePath}" 2>/dev/null`,
+    cwd,
+  );
+  const existsInTarget = checkFile.ok;
+
+  // 2. 작업 디렉토리에 파일이 있는지 확인
+  const fs = require("fs");
+  const absPath = path.join(cwd, filePath);
+  const existsInWorking = fs.existsSync(absPath);
+
+  let status;
+  if (!existsInTarget && existsInWorking) {
+    // target에는 없고 로컬에만 있음 = 추가
+    status = "A";
+  } else if (existsInTarget && !existsInWorking) {
+    // target에는 있고 로컬에서 삭제됨 = 삭제
+    status = "D";
+  } else if (existsInTarget && existsInWorking) {
+    // 둘 다 있음 = 수정 여부 확인
+    const diffCheck = await run(
+      `git diff ${targetBranch} -- "${filePath}"`,
+      cwd,
+    );
+    if (diffCheck.ok && diffCheck.out.trim()) {
+      status = "M";
+    } else {
+      // 변경사항 없음 - 리스트에 추가 안 함
+      return null;
+    }
+  } else {
+    return null;
+  }
+
+  return {
+    status,
+    filePath,
+    oldPath: null,
+  };
+}
+
+async function getChangedFiles(
+  cwd,
+  mode,
+  baseBranch,
+  localCompareTarget = "HEAD",
+) {
   if (!cwd) return { error: "No workspace folder open." };
 
   if (_isGitRepo === null) {
@@ -115,39 +164,185 @@ async function getChangedFiles(cwd, mode, baseBranch) {
   const files = [];
 
   if (mode === "workingTree") {
-    const res = await run("git status --porcelain", cwd);
-    if (!res.ok) return { error: "git status failed: " + res.err };
-    if (!res.out) return { files: [] };
+    // HEAD와 비교할 때는 git status 사용
+    if (localCompareTarget === "HEAD") {
+      const res = await run("git status --porcelain", cwd);
+      if (!res.ok) return { error: "git status failed: " + res.err };
+      if (!res.out) return { files: [] };
 
-    for (const line of res.out.split("\n")) {
-      if (!line.trim()) continue;
-      const x = line[0];
-      const y = line[1];
-      if (x === "?" || x === "!") continue;
-      if (y === " ") continue;
+      console.log("[DEBUG] git status output:");
+      console.log(res.out);
+      console.log("[DEBUG] Total lines:", res.out.split("\n").length);
 
-      const raw = line.substring(3);
-      let status = "M";
-      if (y === "A") status = "A";
-      else if (y === "D") status = "D";
-      else if (y === "R") status = "R";
+      for (const line of res.out.split("\n")) {
+        if (!line.trim()) continue;
+        const x = line[0];
+        const y = line[1];
 
-      let filePath = raw.trim();
-      let oldPath = null;
-      if (status === "R" && raw.includes(" -> ")) {
-        const parts = raw.split(" -> ");
-        oldPath = parts[0].trim();
-        filePath = parts[1].trim();
+        console.log(`[DEBUG] Line: "${line}" | X="${x}" Y="${y}"`);
+
+        // ignored 파일만 제외
+        if (x === "!") {
+          console.log(`[DEBUG] Skipped (ignored)`);
+          continue;
+        }
+
+        // 파일 경로는 XY 이후부터 (공백 제거)
+        // "M  file.js" → "file.js"
+        // " M file.js" → "file.js"
+        // "?? file.js" → "file.js"
+        const raw = line.substring(2).trimStart();
+        let status = "M";
+
+        // Untracked 파일
+        if (x === "?") {
+          status = "A"; // 추가된 파일로 표시
+        }
+        // Y(working tree)를 우선 체크, 없으면 X(staged)를 사용
+        else if (y === "A" || (y === " " && x === "A")) status = "A";
+        else if (y === "D" || (y === " " && x === "D")) status = "D";
+        else if (y === "R" || (y === " " && x === "R")) status = "R";
+        else if (y === "M" || (y === " " && x === "M")) status = "M";
+
+        let filePath = raw.trim();
+        let oldPath = null;
+        if (status === "R" && raw.includes(" -> ")) {
+          const parts = raw.split(" -> ");
+          oldPath = parts[0].trim();
+          filePath = parts[1].trim();
+        }
+
+        // 디렉토리인 경우 (끝에 / 있음) → 내부 파일들을 개별적으로 추가
+        if (filePath.endsWith("/")) {
+          const dirPath = filePath.slice(0, -1); // 마지막 / 제거
+
+          try {
+            // git ls-files를 사용하여 untracked 파일 목록 가져오기
+            const { stdout } = await execAsync(
+              `git ls-files --others --exclude-standard "${dirPath}"`,
+              {
+                cwd,
+                maxBuffer: 1024 * 1024 * 10,
+              },
+            );
+
+            const filesInDir = stdout.trim().split("\n").filter(Boolean);
+            console.log(
+              `[DEBUG] Found ${filesInDir.length} files in ${dirPath}`,
+            );
+
+            for (const relFile of filesInDir) {
+              files.push({
+                status,
+                filePath: relFile,
+                oldPath: null,
+                category: extCategory(relFile),
+              });
+              console.log(`[DEBUG] Added (from dir): ${status} ${relFile}`);
+            }
+          } catch (err) {
+            // 폴더 접근 실패 시 에러 자세히 로깅
+            console.log(`[DEBUG] Cannot expand directory: ${dirPath}`);
+            console.log(`[DEBUG] Error: ${err.message}`);
+            files.push({
+              status,
+              filePath,
+              oldPath,
+              category: "ETC",
+            });
+          }
+        } else {
+          // 일반 파일
+          files.push({
+            status,
+            filePath,
+            oldPath,
+            category: extCategory(filePath),
+          });
+          console.log(`[DEBUG] Added: ${status} ${filePath}`);
+        }
+      }
+      console.log(`[DEBUG] Total files found: ${files.length}`);
+      return { files, compareTarget: localCompareTarget };
+    } else {
+      // 다른 브랜치와 로컬 변경사항 비교
+      // 1단계: git status로 변경된 파일 목록 가져오기
+      const statusRes = await run("git status --porcelain", cwd);
+      if (!statusRes.ok)
+        return { error: "git status failed: " + statusRes.err };
+      if (!statusRes.out)
+        return { files: [], compareTarget: localCompareTarget };
+
+      console.log(
+        `[DEBUG] Comparing local changes against: ${localCompareTarget}`,
+      );
+
+      // 2단계: 각 변경된 파일을 처리
+      for (const line of statusRes.out.split("\n")) {
+        if (!line.trim()) continue;
+        const x = line[0];
+        const y = line[1];
+
+        // ignored 파일 제외
+        if (x === "!") continue;
+
+        const raw = line.substring(2).trimStart();
+        let filePath = raw.trim();
+        let oldPath = null;
+
+        // Rename 처리
+        if (raw.includes(" -> ")) {
+          const parts = raw.split(" -> ");
+          oldPath = parts[0].trim();
+          filePath = parts[1].trim();
+        }
+
+        // 디렉토리 확장
+        if (filePath.endsWith("/")) {
+          const dirPath = filePath.slice(0, -1);
+          try {
+            const { stdout } = await execAsync(
+              `git ls-files --others --exclude-standard "${dirPath}"`,
+              { cwd, maxBuffer: 1024 * 1024 * 10 },
+            );
+            const filesInDir = stdout.trim().split("\n").filter(Boolean);
+            for (const relFile of filesInDir) {
+              // 각 파일을 선택한 브랜치와 비교
+              const fileStatus = await getFileStatusVsBranch(
+                cwd,
+                relFile,
+                localCompareTarget,
+              );
+              if (fileStatus) {
+                files.push({
+                  ...fileStatus,
+                  category: extCategory(relFile),
+                });
+              }
+            }
+          } catch (err) {
+            console.log(`[DEBUG] Cannot expand directory: ${dirPath}`);
+          }
+          continue;
+        }
+
+        // 3단계: 파일이 선택한 브랜치에 있는지 확인
+        const fileStatus = await getFileStatusVsBranch(
+          cwd,
+          filePath,
+          localCompareTarget,
+        );
+        if (fileStatus) {
+          files.push({
+            ...fileStatus,
+            category: extCategory(filePath),
+          });
+        }
       }
 
-      files.push({
-        status,
-        filePath,
-        oldPath,
-        category: extCategory(filePath),
-      });
+      console.log(`[DEBUG] Total files found: ${files.length}`);
+      return { files, compareTarget: localCompareTarget };
     }
-    return { files };
   }
 
   const base = baseBranch || "main";
@@ -180,20 +375,37 @@ async function getChangedFiles(cwd, mode, baseBranch) {
   return { files, base };
 }
 
-async function getPanelDiff(cwd, filePath, oldPath, status, mode, baseBranch) {
+async function getPanelDiff(
+  cwd,
+  filePath,
+  oldPath,
+  status,
+  mode,
+  baseBranch,
+  localTarget = "HEAD",
+) {
   if (!cwd) return { diffText: "", error: "No workspace" };
 
   const safe = filePath.replace(/"/g, '\\"');
   const safeOld = (oldPath || filePath).replace(/"/g, '\\"');
   const base = baseBranch || "main";
+  const target = localTarget || "HEAD";
   let res;
 
   if (status === "R") {
     if (mode === "workingTree") {
-      res = await run(
-        `git diff --no-ext-diff --unified=3 --find-renames HEAD -- "${safeOld}" "${safe}"`,
-        cwd,
-      );
+      // LOCAL 모드에서 rename 처리
+      if (target === "HEAD") {
+        res = await run(
+          `git diff --no-ext-diff --unified=3 --find-renames HEAD -- "${safeOld}" "${safe}"`,
+          cwd,
+        );
+      } else {
+        res = await run(
+          `git diff --no-ext-diff --unified=3 --find-renames ${target} -- "${safeOld}" "${safe}"`,
+          cwd,
+        );
+      }
     } else {
       res = await run(
         `git diff --no-ext-diff --unified=3 --find-renames ${base}...HEAD -- "${safeOld}" "${safe}"`,
@@ -201,7 +413,15 @@ async function getPanelDiff(cwd, filePath, oldPath, status, mode, baseBranch) {
       );
     }
   } else if (mode === "workingTree") {
-    res = await run(`git diff --no-ext-diff --unified=3 -- "${safe}"`, cwd);
+    // LOCAL 모드에서 일반 파일 처리
+    if (target === "HEAD") {
+      res = await run(`git diff --no-ext-diff --unified=3 -- "${safe}"`, cwd);
+    } else {
+      res = await run(
+        `git diff --no-ext-diff --unified=3 ${target} -- "${safe}"`,
+        cwd,
+      );
+    }
   } else {
     res = await run(
       `git diff --no-ext-diff --unified=3 ${base}...HEAD -- "${safe}"`,
@@ -240,8 +460,10 @@ async function openEditorDiff(
   status,
   mode,
   baseBranch,
+  localTarget = "HEAD",
 ) {
   const base = baseBranch || "main";
+  const target = localTarget || "HEAD";
   const absPath = path.join(cwd, filePath);
   const basename = path.basename(filePath);
 
@@ -265,10 +487,10 @@ async function openEditorDiff(
         content: "",
         language: guessLanguage(filePath),
       });
-      leftUri = makeGitUri(absPath, "HEAD");
+      leftUri = makeGitUri(absPath, target);
       rightUri = emptyDoc.uri;
     } else {
-      leftUri = makeGitUri(oldPath ? path.join(cwd, oldPath) : absPath, "HEAD");
+      leftUri = makeGitUri(oldPath ? path.join(cwd, oldPath) : absPath, target);
       rightUri = vscode.Uri.file(absPath);
     }
   } else {
@@ -343,6 +565,7 @@ class PixelBranchDiffProvider {
         if (this._view) this._view.webview.postMessage({ type: "loading" });
         this._sendData(cwd, mode, baseBranch);
       } else if (msg.type === "getDiff") {
+        const localTarget = _state.localCompareTarget || "HEAD";
         const diff = await getPanelDiff(
           cwd,
           msg.filePath,
@@ -350,6 +573,7 @@ class PixelBranchDiffProvider {
           msg.status,
           mode,
           baseBranch,
+          localTarget,
         );
         webviewView.webview.postMessage({
           type: "diffResult",
@@ -363,18 +587,21 @@ class PixelBranchDiffProvider {
           const fileUri = vscode.Uri.file(path.join(cwd, msg.filePath));
           if (isImageFile(msg.filePath)) {
             await vscode.commands.executeCommand("vscode.open", fileUri, {
-              preview: true,
+              preview: false,
             });
           } else {
             const doc = await vscode.workspace.openTextDocument(fileUri);
-            await vscode.window.showTextDocument(doc, { preview: true });
+            await vscode.window.showTextDocument(doc, { preview: false });
           }
-        } catch {
-          vscode.window.showErrorMessage("Cannot open: " + msg.filePath);
+        } catch (err) {
+          vscode.window.showErrorMessage(
+            `Cannot open: ${msg.filePath}\nFull path: ${path.join(cwd, msg.filePath)}\nError: ${err.message}`,
+          );
         }
       } else if (msg.type === "openEditorDiff") {
         if (!cwd) return;
         try {
+          const localTarget = _state.localCompareTarget || "HEAD";
           await openEditorDiff(
             cwd,
             msg.filePath,
@@ -382,6 +609,7 @@ class PixelBranchDiffProvider {
             msg.status,
             mode,
             baseBranch,
+            localTarget,
           );
         } catch (e) {
           vscode.window.showErrorMessage(
@@ -425,6 +653,44 @@ class PixelBranchDiffProvider {
           _state.baseBranch = picked;
           await this._sendData(cwd, mode, picked);
         }
+      } else if (msg.type === "setLocalTarget") {
+        const res = await run("git branch --format=%(refname:short)", cwd);
+        const reflog = await run(
+          "git reflog show --pretty=format:%D HEAD -n 50",
+          cwd,
+        );
+        const recentBranches = reflog.ok
+          ? reflog.out
+              .split("\n")
+              .flatMap((line) => line.split(", "))
+              .map((ref) => ref.replace("HEAD -> ", "").trim())
+              .filter(
+                (ref) => !ref.startsWith("origin/") && ref !== "HEAD" && ref,
+              )
+              .filter((b, i, arr) => arr.indexOf(b) === i)
+          : [];
+        const allBranches = res.ok
+          ? res.out
+              .split("\n")
+              .map((b) => b.trim())
+              .filter(Boolean)
+          : [];
+        const uniqueBranches = [
+          ...new Set([...recentBranches, ...allBranches]),
+        ];
+
+        // HEAD를 맨 앞에 추가
+        const options = ["HEAD", ...uniqueBranches];
+        const picked = await vscode.window.showQuickPick(options, {
+          title: "LOCAL 모드 비교 대상 선택",
+          placeHolder: "현재 작업을 어떤 브랜치와 비교할까요?",
+        });
+
+        if (picked !== undefined) {
+          if (this._view) this._view.webview.postMessage({ type: "loading" });
+          _state.localCompareTarget = picked;
+          await this._sendData(cwd, mode, baseBranch);
+        }
       } else if (msg.type === "toggleMode") {
         const newMode = mode === "compareBase" ? "workingTree" : "compareBase";
         if (this._view) this._view.webview.postMessage({ type: "loading" });
@@ -439,10 +705,12 @@ class PixelBranchDiffProvider {
   async _sendData(cwd, mode, baseBranch) {
     if (!this._view) return;
 
+    const localTarget = _state.localCompareTarget || "HEAD";
+
     const [branch, result] = await Promise.all([
       cwd ? getCurrentBranch(cwd) : Promise.resolve("(no workspace)"),
       cwd
-        ? getChangedFiles(cwd, mode, baseBranch)
+        ? getChangedFiles(cwd, mode, baseBranch, localTarget)
         : Promise.resolve({ error: "No workspace folder open." }),
     ]);
 
@@ -451,6 +719,7 @@ class PixelBranchDiffProvider {
       branch,
       mode,
       baseBranch: baseBranch || "main",
+      localTarget: localTarget,
       ...result,
     });
   }
@@ -462,6 +731,10 @@ class PixelBranchDiffProvider {
     if (!_state.baseBranch && cwd) {
       const detectedBase = await getDefaultBranch(cwd);
       if (detectedBase) _state.baseBranch = detectedBase;
+    }
+
+    if (!_state.localCompareTarget) {
+      _state.localCompareTarget = "HEAD";
     }
 
     this._view.webview.postMessage({ type: "loading" });
@@ -515,7 +788,7 @@ function buildHtml(webview, extensionUri) {
     "#action-row{display:flex;gap:4px;align-items:center;flex-wrap:wrap}",
     "#mascot{padding:6px 8px 4px;display:flex;align-items:center;gap:7px;border-bottom:1px solid var(--border);flex-shrink:0;position:relative;overflow:hidden}",
     "#mascot .dots{position:absolute;right:0;top:0;width:50px;height:100%;background-image:radial-gradient(circle,var(--border) 1px,transparent 1px);background-size:6px 6px;opacity:.3;pointer-events:none}",
-    ".m-text{font-size:10px;font-family:var(--mono);opacity:.75;line-height:1.5}",
+    ".m-text{font-size:10px;font-family:var(--mono);opacity:.85;line-height:1.5}",
     ".m-count{font-size:10px;font-family:var(--mono);font-weight:bold;color:var(--accent)}",
     "#main{display:flex;flex:1;min-height:0;overflow:hidden}",
     "#file-panel{width:100%;display:flex;flex-direction:column;border-right:1px solid var(--border);min-height:0;transition:width .2s}",
@@ -523,11 +796,17 @@ function buildHtml(webview, extensionUri) {
     "#file-scroll{flex:1;overflow-y:auto;overflow-x:hidden;padding:4px 0}",
     "#file-scroll::-webkit-scrollbar{width:4px}",
     "#file-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}",
-    ".fi{display:flex;flex-direction:column;padding:6px 8px 6px 6px;cursor:pointer;border-left:2px solid transparent;gap:4px}",
+    ".fi{display:flex;align-items:flex-start;padding:6px 8px;cursor:pointer;border-left:2px solid transparent;gap:8px;transition:background .08s}",
     ".fi:hover{background:var(--hover)}",
     ".fi.sel{background:var(--hover);border-left-color:var(--accent)}",
+    ".fi-checkbox-wrapper{display:flex;align-items:center;padding-top:2px}",
+    ".file-checkbox{appearance:none;width:16px;height:16px;border:1px solid var(--vscode-checkbox-border);border-radius:3px;cursor:pointer;position:relative;transition:all .15s;flex-shrink:0;background:var(--vscode-checkbox-background)}",
+    ".file-checkbox:hover{border-color:var(--vscode-checkbox-border)}",
+    ".file-checkbox:checked{background:var(--vscode-checkbox-selectBackground);border-color:var(--vscode-checkbox-selectBorder)}",
+    ".file-checkbox:checked::after{content:'';position:absolute;left:4.5px;top:1px;width:4px;height:8px;border:solid var(--vscode-checkbox-foreground);border-width:0 2px 2px 0;transform:rotate(45deg)}",
+    ".fi-content{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}",
     ".fi-top{display:flex;align-items:center;gap:4px;min-width:0}",
-    ".sbadge{font-size:10px;font-family:var(--mono);font-weight:900;padding:0 4px;border-radius:2px;flex-shrink:0;line-height:14px;height:14px;display:inline-flex;align-items:center;background:color-mix(in srgb,currentColor 15%,transparent);border:1px solid color-mix(in srgb,currentColor 35%,transparent)}",
+    ".sbadge{font-size:10px;font-family:var(--mono);font-weight:900;padding:0 4px;border-radius:2px;flex-shrink:0;line-height:14px;height:14px;display:inline-flex;align-items:center;background:color-mix(in srgb,currentColor 20%,transparent);border:1px solid color-mix(in srgb,currentColor 45%,transparent)}",
     ".s-M{color:var(--c-mod)}",
     ".s-A{color:var(--c-add)}",
     ".s-D{color:var(--c-del)}",
@@ -576,6 +855,22 @@ function buildHtml(webview, extensionUri) {
     ".dt.wrap td:last-child{white-space:pre-wrap!important;word-break:break-all;overflow-wrap:anywhere}",
     "#empty-state{padding:24px 12px;text-align:center;font-size:11px;font-family:var(--mono);opacity:.6;line-height:1.8}",
     "#err-box{padding:10px 12px;font-size:11px;font-family:var(--mono);color:#dc5050;background:rgba(220,80,80,.08);border:1px solid rgba(220,80,80,.2);border-radius:var(--r);margin:8px;line-height:1.6}",
+    "#search-row{display:flex;gap:6px;margin-top:8px;align-items:center}",
+    "#select-all-wrapper{display:flex;align-items:center;gap:4px;padding:0 4px}",
+    "#select-all{appearance:none;width:16px;height:16px;border:1px solid var(--vscode-checkbox-border);border-radius:3px;cursor:pointer;position:relative;transition:all .15s;background:var(--vscode-checkbox-background)}",
+    "#select-all:hover{border-color:var(--vscode-checkbox-border)}",
+    "#select-all:checked{background:var(--vscode-checkbox-selectBackground);border-color:var(--vscode-checkbox-selectBorder)}",
+    "#select-all:checked::after{content:'';position:absolute;left:4.5px;top:1px;width:4px;height:8px;border:solid var(--vscode-checkbox-foreground);border-width:0 2px 2px 0;transform:rotate(45deg)}",
+    "#select-count{font-size:10px;font-family:var(--mono);color:var(--fg);opacity:.6}",
+    "#search-input{flex:1;padding:5px 8px;font-size:12px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1.5px solid var(--border);border-radius:var(--r);font-family:var(--mono)}",
+    "#search-input::placeholder{color:var(--vscode-input-placeholderForeground);opacity:.8}",
+    "#search-input:focus{outline:1px solid var(--accent);outline-offset:-1px}",
+    ".action-btn{padding:5px 12px;font-size:11px;font-weight:600;border:1px solid var(--accent);background:var(--accent);color:var(--vscode-button-foreground,#fff);border-radius:var(--r);cursor:pointer;font-family:var(--mono);transition:all .15s;white-space:nowrap}",
+    ".action-btn:hover{background:var(--vscode-button-hoverBackground,var(--accent));opacity:.9}",
+    ".action-btn:active{transform:scale(.98)}",
+    ".action-btn:disabled{opacity:.4;cursor:not-allowed}",
+    ".fname mark{background:var(--vscode-editor-findMatchHighlightBackground,rgba(234,92,0,.33));color:inherit;padding:0;border-radius:2px}",
+    ".fdir mark{background:var(--vscode-editor-findMatchHighlightBackground,rgba(234,92,0,.33));color:inherit;padding:0;border-radius:2px}",
     ".spin{display:inline-block;width:10px;height:10px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;vertical-align:middle}",
     "@keyframes sp{to{transform:rotate(360deg)}}",
   ].join("\n");
@@ -619,6 +914,7 @@ function buildHtml(webview, extensionUri) {
     '    <span class="tag" id="t-branch">...</span>\n' +
     '    <span style="opacity:.4;font-size:10px" id="vs-sep">vs</span>\n' +
     '    <span class="tag-base" id="t-base" title="Click to change base branch">&#x270E; main</span>\n' +
+    '    <span class="tag-base" id="t-local-target" style="display:none" title="Click to change compare target">&#x270E; HEAD</span>\n' +
     "  </div>\n" +
     '<div id="mascot">\n' +
     MASCOT +
@@ -629,6 +925,14 @@ function buildHtml(webview, extensionUri) {
     '  <div id="action-row">\n' +
     '    <div id="pills"></div>\n' +
     '    <div style="flex:1"></div>\n' +
+    "  </div>\n" +
+    '  <div id="search-row">\n' +
+    '    <div id="select-all-wrapper">\n' +
+    '      <input type="checkbox" id="select-all" title="Select all filtered files" />\n' +
+    '      <span id="select-count"></span>\n' +
+    "    </div>\n" +
+    '    <input type="text" id="search-input" placeholder="Search files..." />\n' +
+    '    <button class="action-btn" id="btn-open-selected" title="Open selected files">Open</button>\n' +
     "  </div>\n" +
     "</div>\n" +
     '<div id="main">\n' +
@@ -693,6 +997,42 @@ function activate(context) {
         if (picked !== undefined) {
           await config.update(
             "baseBranch",
+            picked,
+            vscode.ConfigurationTarget.Workspace,
+          );
+          provider.refresh();
+        }
+      },
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "pixelBranchDiff.setLocalTarget",
+      async () => {
+        const cwd = getCwd();
+        const config = vscode.workspace.getConfiguration("pixelBranchDiff");
+        const res = await run("git branch --format=%(refname:short)", cwd);
+        const branches = res.ok
+          ? res.out
+              .split("\n")
+              .map((b) => b.trim())
+              .filter(Boolean)
+          : [];
+
+        // HEAD 옵션 추가
+        const options = ["HEAD", ...branches];
+        const current = config.get("localCompareTarget") || "HEAD";
+
+        const picked = await vscode.window.showQuickPick(options, {
+          title: "LOCAL 모드 비교 대상 선택",
+          placeHolder: "어떤 브랜치와 비교할까요?",
+          activeItems: [current],
+        });
+
+        if (picked !== undefined) {
+          await config.update(
+            "localCompareTarget",
             picked,
             vscode.ConfigurationTarget.Workspace,
           );
