@@ -13,6 +13,7 @@
     localTarget: "HEAD",
     diffOpen: false,
     error: null,
+    isToggling: false,
   };
 
   function getCategoryCounts(files) {
@@ -84,6 +85,7 @@
 
       b.onclick = function () {
         state.filter = p;
+        state.selectedFiles = []; // 필터 변경 시 선택 초기화
 
         document.querySelectorAll("[data-pill]").forEach(function (el) {
           el.classList.toggle("active-pill", el.dataset.pill === p);
@@ -96,9 +98,49 @@
     });
   }
 
-  document.getElementById("btn-mode").onclick = function () {
-    vscode.postMessage({ type: "toggleMode" });
-  };
+  // 토글 버튼 클릭 핸들러
+  document.querySelectorAll(".toggle-option").forEach(function (btn) {
+    btn.onclick = function () {
+      // 전환 중이면 무시
+      if (state.isToggling) return;
+
+      state.isToggling = true;
+      var modeToggle = document.getElementById("mode-toggle");
+      if (modeToggle) {
+        modeToggle.style.pointerEvents = "none";
+        modeToggle.style.opacity = "0.7";
+      }
+
+      // 즉시 UI 전환
+      var targetMode = this.dataset.mode;
+      var btnBranch = document.getElementById("btn-branch");
+      var btnLocal = document.getElementById("btn-local");
+      var toggleBg = document.getElementById("toggle-bg");
+
+      if (targetMode === "branch") {
+        btnBranch.classList.add("active");
+        btnLocal.classList.remove("active");
+        toggleBg.classList.remove("local");
+      } else {
+        btnBranch.classList.remove("active");
+        btnLocal.classList.add("active");
+        toggleBg.classList.add("local");
+      }
+
+      // 카운트 로딩 표시
+      document.getElementById("m-msg").textContent = "scanning...";
+      document.getElementById("m-count").textContent = "...";
+
+      // 선택 카운터도 초기화
+      var selectCountEl = document.getElementById("select-count");
+      if (selectCountEl) {
+        selectCountEl.textContent = "...";
+      }
+
+      // 백그라운드에서 데이터 로드
+      vscode.postMessage({ type: "toggleMode" });
+    };
+  });
 
   document.getElementById("t-base").onclick = function () {
     vscode.postMessage({ type: "setBaseBranch" });
@@ -262,8 +304,9 @@
 
       // 체크박스 이벤트
       var checkbox = item.querySelector(".file-checkbox");
-      checkbox.addEventListener("click", function (ev) {
-        ev.stopPropagation();
+      var checkboxWrapper = item.querySelector(".fi-checkbox-wrapper");
+
+      checkbox.addEventListener("change", function (ev) {
         var path = this.dataset.path;
         var idx = state.selectedFiles.indexOf(path);
 
@@ -272,12 +315,26 @@
         } else if (!this.checked && idx !== -1) {
           state.selectedFiles.splice(idx, 1);
         }
+
+        // 카운트 업데이트
+        updateSelectCount();
+      });
+
+      checkbox.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+      });
+
+      checkboxWrapper.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        checkbox.checked = !checkbox.checked;
+        checkbox.dispatchEvent(new Event("change"));
       });
 
       item.addEventListener("click", function (ev) {
         if (
           ev.target.closest("[data-a]") ||
-          ev.target.closest(".file-checkbox")
+          ev.target.closest(".file-checkbox") ||
+          ev.target.closest(".fi-checkbox-wrapper")
         )
           return;
         vscode.postMessage({ type: "openFile", filePath: f.filePath });
@@ -314,6 +371,11 @@
     });
 
     // 전체선택 체크박스 상태 및 카운트 업데이트
+    updateSelectCount();
+  }
+
+  function updateSelectCount() {
+    var filtered = getFilteredFiles();
     var selectAllCheckbox = document.getElementById("select-all");
     var selectCountEl = document.getElementById("select-count");
 
@@ -395,15 +457,17 @@
     });
 
     var statusText =
-      status === "A"
-        ? "ADDED"
-        : status === "D"
-          ? "DELETED"
-          : status === "R"
-            ? isModified
-              ? "RENAMED+MOD"
-              : "RENAMED"
-            : "MODIFIED";
+      status === "U"
+        ? "CONFLICT"
+        : status === "A"
+          ? "ADDED"
+          : status === "D"
+            ? "DELETED"
+            : status === "R"
+              ? isModified
+                ? "RENAMED+MOD"
+                : "RENAMED"
+              : "MODIFIED";
 
     var statusCls =
       "dh-status dh-status-" +
@@ -574,19 +638,42 @@
       state.base = msg.baseBranch || "main";
       state.branch = msg.branch || "...";
       state.localTarget = msg.localTarget || "HEAD";
+      state.selectedFiles = []; // 브랜치/모드 변경 시 선택 초기화
+
+      // 토글 다시 활성화
+      state.isToggling = false;
+      var modeToggle = document.getElementById("mode-toggle");
+      if (modeToggle) {
+        modeToggle.style.pointerEvents = "";
+        modeToggle.style.opacity = "";
+      }
 
       document.getElementById("t-branch").textContent = state.branch;
-      var modeBtn = document.getElementById("btn-mode");
-      if (modeBtn) {
-        modeBtn.innerHTML =
-          state.mode === "compareBase"
-            ? '<span class="ico">&#x21CC;</span><span>BRANCH</span>'
-            : '<span class="ico">&#x21CC;</span><span>LOCAL</span>';
+
+      // 토글 버튼 업데이트 (슬라이딩 배경)
+      var btnBranch = document.getElementById("btn-branch");
+      var btnLocal = document.getElementById("btn-local");
+      var toggleBg = document.getElementById("toggle-bg");
+
+      if (btnBranch && btnLocal && toggleBg) {
+        if (state.mode === "compareBase") {
+          btnBranch.classList.add("active");
+          btnLocal.classList.remove("active");
+          toggleBg.classList.remove("local");
+        } else {
+          btnBranch.classList.remove("active");
+          btnLocal.classList.add("active");
+          toggleBg.classList.add("local");
+        }
       }
+
       document.getElementById("t-base").textContent = "\u270E " + state.base;
       document.getElementById("t-local-target").textContent =
         "\u270E " + state.localTarget;
 
+      // LOCAL 모드일 때 현재 브랜치 숨기기
+      document.getElementById("t-branch").style.display =
+        state.mode === "compareBase" ? "" : "none";
       document.getElementById("vs-sep").style.display =
         state.mode === "compareBase" ? "" : "none";
       document.getElementById("t-base").style.display =

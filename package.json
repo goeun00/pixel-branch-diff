@@ -2,7 +2,7 @@
   "name": "pixel-branch-diff-explorer",
   "displayName": "Pixel Branch Diff Explorer",
   "description": "Show changed files of current git branch in a cute retro pixel UI with inline diff viewer",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "engines": {
     "vscode": "^1.85.0"
   },

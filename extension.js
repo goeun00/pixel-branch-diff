@@ -166,13 +166,27 @@ async function getChangedFiles(
   if (mode === "workingTree") {
     // HEAD와 비교할 때는 git status 사용
     if (localCompareTarget === "HEAD") {
+      // 1. 먼저 충돌 파일 확인
+      const conflictRes = await run(
+        "git diff --name-only --diff-filter=U",
+        cwd,
+      );
+      const conflictFiles =
+        conflictRes.ok && conflictRes.out
+          ? conflictRes.out.split("\n").filter((f) => f.trim())
+          : [];
+
+      console.log("[DEBUG] Conflict files:", conflictFiles);
+
       const res = await run("git status --porcelain", cwd);
       if (!res.ok) return { error: "git status failed: " + res.err };
-      if (!res.out) return { files: [] };
+      if (!res.out && conflictFiles.length === 0) return { files: [] };
 
       console.log("[DEBUG] git status output:");
       console.log(res.out);
       console.log("[DEBUG] Total lines:", res.out.split("\n").length);
+
+      const conflictSet = new Set(conflictFiles);
 
       for (const line of res.out.split("\n")) {
         if (!line.trim()) continue;
@@ -191,11 +205,31 @@ async function getChangedFiles(
         // "M  file.js" → "file.js"
         // " M file.js" → "file.js"
         // "?? file.js" → "file.js"
+        // "UU file.js" → "file.js" (충돌)
         const raw = line.substring(2).trimStart();
         let status = "M";
 
+        // 충돌 파일 체크 (git diff --diff-filter=U 결과 우선)
+        if (conflictSet.has(raw)) {
+          status = "U";
+          console.log(`[DEBUG] ⚠️ CONFLICT (from git diff): "${raw}"`);
+        }
+        // 충돌 파일 (Unmerged) - Git의 모든 충돌 상태
+        else if (
+          x === "U" ||
+          y === "U" ||
+          (x === "D" && y === "D") ||
+          (x === "A" && y === "A") ||
+          (x === "A" && y === "U") ||
+          (x === "U" && y === "D") ||
+          (x === "U" && y === "A") ||
+          (x === "D" && y === "U")
+        ) {
+          status = "U"; // 충돌 상태
+          console.log(`[DEBUG] ⚠️ CONFLICT (from status): "${raw}" (${x}${y})`);
+        }
         // Untracked 파일
-        if (x === "?") {
+        else if (x === "?") {
           status = "A"; // 추가된 파일로 표시
         }
         // Y(working tree)를 우선 체크, 없으면 X(staged)를 사용
@@ -617,11 +651,33 @@ class PixelBranchDiffProvider {
           );
         }
       } else if (msg.type === "setBaseBranch") {
-        const res = await run("git branch --format=%(refname:short)", cwd);
-        const reflog = await run(
-          "git reflog show --pretty=format:%D HEAD -n 50",
+        // QuickPick 먼저 표시 (즉각 반응!)
+        const qp = vscode.window.createQuickPick();
+        qp.title = "Base Branch 선택";
+        qp.placeholder = "브랜치 목록을 불러오는 중...";
+        qp.busy = true;
+        qp.items = [];
+        qp.show();
+
+        // 백그라운드에서 데이터 로드
+        const currentBranchRes = await run(
+          "git rev-parse --abbrev-ref HEAD",
           cwd,
         );
+        const currentBranch = currentBranchRes.ok
+          ? currentBranchRes.out.trim()
+          : "";
+
+        const res = await run("git branch --format=%(refname:short)", cwd);
+        const remoteRes = await run(
+          "git for-each-ref --format=%(refname:short) refs/remotes/",
+          cwd,
+        );
+        const reflog = await run(
+          "git reflog show --pretty=format:%D HEAD -n 10",
+          cwd,
+        );
+
         const recentBranches = reflog.ok
           ? reflog.out
               .split("\n")
@@ -638,27 +694,93 @@ class PixelBranchDiffProvider {
               .map((b) => b.trim())
               .filter(Boolean)
           : [];
-        const branches = [
-          ...recentBranches,
-          ...allLocal.filter((b) => !recentBranches.includes(b)),
+        const allRemote = remoteRes.ok
+          ? remoteRes.out
+              .split("\n")
+              .map((b) => b.trim().replace(/^'|'$/g, ""))
+              .filter((b) => b && !b.includes("/HEAD"))
+          : [];
+
+        const addIcon = (branch) => {
+          if (branch === currentBranch) return `$(star-full) ${branch}`;
+          if (recentBranches.includes(branch)) return `$(clock) ${branch}`;
+          if (branch.startsWith("origin/")) return `$(cloud) ${branch}`;
+          return `$(git-branch) ${branch}`;
+        };
+
+        const initialBranches = [
+          ...recentBranches.map(addIcon),
+          ...allLocal.filter((b) => !recentBranches.includes(b)).map(addIcon),
         ];
 
-        const picked = await vscode.window.showQuickPick(branches, {
-          title: "Base Branch 선택",
-          placeHolder: "비교 기준 브랜치를 선택하세요",
+        const allBranches = [
+          ...recentBranches,
+          ...allLocal.filter((b) => !recentBranches.includes(b)),
+          ...allRemote,
+        ];
+
+        console.log("[Pixel Branch Diff] Local branches:", allLocal.length);
+        console.log("[Pixel Branch Diff] Remote branches:", allRemote.length);
+
+        // 로딩 완료 - UI 업데이트
+        qp.busy = false;
+        qp.placeholder =
+          "비교 기준 브랜치를 선택하세요 (로컬/리모트 모두 검색 가능)";
+        qp.items = initialBranches.map((label) => ({ label }));
+        qp.matchOnDescription = true;
+        qp.matchOnDetail = true;
+
+        qp.onDidChangeValue((value) => {
+          if (value.trim() === "") {
+            // 검색어 없으면 초기 목록 (로컬만)
+            qp.items = initialBranches.map((label) => ({ label }));
+          } else {
+            // 검색 시 로컬+리모트 모두 검색
+            const filtered = allBranches
+              .filter((b) => b.toLowerCase().includes(value.toLowerCase()))
+              .map(addIcon);
+            qp.items = filtered.map((label) => ({ label }));
+          }
         });
 
-        if (picked !== undefined) {
-          if (this._view) this._view.webview.postMessage({ type: "loading" });
-          _state.baseBranch = picked;
-          await this._sendData(cwd, mode, picked);
-        }
+        qp.onDidAccept(() => {
+          const picked = qp.selectedItems[0]?.label;
+          qp.hide();
+          if (picked) {
+            if (this._view) this._view.webview.postMessage({ type: "loading" });
+            const cleanBranch = picked.replace(/^\$\([^)]+\)\s+/, "");
+            _state.baseBranch = cleanBranch;
+            this._sendData(cwd, mode, cleanBranch);
+          }
+        });
       } else if (msg.type === "setLocalTarget") {
-        const res = await run("git branch --format=%(refname:short)", cwd);
-        const reflog = await run(
-          "git reflog show --pretty=format:%D HEAD -n 50",
+        // QuickPick 먼저 표시 (즉각 반응!)
+        const qp = vscode.window.createQuickPick();
+        qp.title = "LOCAL 모드 비교 대상 선택";
+        qp.placeholder = "브랜치 목록을 불러오는 중...";
+        qp.busy = true;
+        qp.items = [];
+        qp.show();
+
+        // 백그라운드에서 데이터 로드
+        const currentBranchRes = await run(
+          "git rev-parse --abbrev-ref HEAD",
           cwd,
         );
+        const currentBranch = currentBranchRes.ok
+          ? currentBranchRes.out.trim()
+          : "";
+
+        const res = await run("git branch --format=%(refname:short)", cwd);
+        const remoteRes = await run(
+          "git for-each-ref --format=%(refname:short) refs/remotes/",
+          cwd,
+        );
+        const reflog = await run(
+          "git reflog show --pretty=format:%D HEAD -n 10",
+          cwd,
+        );
+
         const recentBranches = reflog.ok
           ? reflog.out
               .split("\n")
@@ -669,28 +791,65 @@ class PixelBranchDiffProvider {
               )
               .filter((b, i, arr) => arr.indexOf(b) === i)
           : [];
-        const allBranches = res.ok
+        const allLocal = res.ok
           ? res.out
               .split("\n")
               .map((b) => b.trim())
               .filter(Boolean)
           : [];
-        const uniqueBranches = [
-          ...new Set([...recentBranches, ...allBranches]),
+        const allRemote = remoteRes.ok
+          ? remoteRes.out
+              .split("\n")
+              .map((b) => b.trim().replace(/^'|'$/g, ""))
+              .filter((b) => b && !b.includes("/HEAD"))
+          : [];
+
+        const addIcon = (branch) => {
+          if (branch === "HEAD") return `$(target) ${branch}`;
+          if (branch === currentBranch) return `$(star-full) ${branch}`;
+          if (recentBranches.includes(branch)) return `$(clock) ${branch}`;
+          if (branch.startsWith("origin/")) return `$(cloud) ${branch}`;
+          return `$(git-branch) ${branch}`;
+        };
+
+        const uniqueLocal = [...new Set([...recentBranches, ...allLocal])];
+        const allBranches = [
+          ...new Set([...recentBranches, ...allLocal, ...allRemote]),
         ];
 
-        // HEAD를 맨 앞에 추가
-        const options = ["HEAD", ...uniqueBranches];
-        const picked = await vscode.window.showQuickPick(options, {
-          title: "LOCAL 모드 비교 대상 선택",
-          placeHolder: "현재 작업을 어떤 브랜치와 비교할까요?",
+        const initialBranches = ["HEAD", ...uniqueLocal].map(addIcon);
+
+        // 로딩 완료 - UI 업데이트
+        qp.busy = false;
+        qp.placeholder =
+          "현재 작업을 어떤 브랜치와 비교할까요? (로컬/리모트 모두 검색 가능)";
+        qp.items = initialBranches.map((label) => ({ label }));
+        qp.matchOnDescription = true;
+        qp.matchOnDetail = true;
+
+        qp.onDidChangeValue((value) => {
+          if (value.trim() === "") {
+            // 검색어 없으면 초기 목록 (로컬만)
+            qp.items = initialBranches.map((label) => ({ label }));
+          } else {
+            // 검색 시 로컬+리모트 모두 검색
+            const filtered = ["HEAD", ...allBranches]
+              .filter((b) => b.toLowerCase().includes(value.toLowerCase()))
+              .map(addIcon);
+            qp.items = filtered.map((label) => ({ label }));
+          }
         });
 
-        if (picked !== undefined) {
-          if (this._view) this._view.webview.postMessage({ type: "loading" });
-          _state.localCompareTarget = picked;
-          await this._sendData(cwd, mode, baseBranch);
-        }
+        qp.onDidAccept(() => {
+          const picked = qp.selectedItems[0]?.label;
+          qp.hide();
+          if (picked) {
+            if (this._view) this._view.webview.postMessage({ type: "loading" });
+            const cleanBranch = picked.replace(/^\$\([^)]+\)\s+/, "");
+            _state.localCompareTarget = cleanBranch;
+            this._sendData(cwd, mode, baseBranch);
+          }
+        });
       } else if (msg.type === "toggleMode") {
         const newMode = mode === "compareBase" ? "workingTree" : "compareBase";
         if (this._view) this._view.webview.postMessage({ type: "loading" });
@@ -779,13 +938,18 @@ function buildHtml(webview, extensionUri) {
     ".btn.active-pill{background:var(--accent)!important;color:var(--bg)!important;border-color:var(--accent)!important}",
     ".btn.sm{padding:1px 5px;font-size:10px}",
     ".btn .ico{font-size:10px;line-height:1;opacity:.9}",
-    "#toolbar{padding:5px 8px 4px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:5px;flex-shrink:0}",
-    "#branch-row{display:flex;align-items:center;gap:5px;font-size:10px;font-family:var(--mono);flex-wrap:wrap}",
+    "#toolbar{padding:5px 8px 0;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:0;flex-shrink:0}",
+    "#branch-row{display:flex;align-items:center;gap:5px;font-size:10px;font-family:var(--mono);flex-wrap:wrap;padding-bottom:5px}",
+    ".mode-toggle{position:relative;display:inline-flex;background:var(--vscode-input-background);border:1px solid var(--border);border-radius:12px;padding:2px;gap:0}",
+    ".toggle-bg{position:absolute;top:2px;left:2px;width:calc(50% - 2px);height:calc(100% - 4px);background:var(--accent);border-radius:10px;transition:transform .25s ease;box-shadow:0 1px 3px rgba(0,0,0,.3);z-index:0}",
+    ".toggle-bg.local{transform:translateX(100%)}",
+    ".toggle-option{position:relative;z-index:1;padding:3px 6px;font-size:10px;font-family:var(--mono);font-weight:700;background:transparent;color:var(--fg);border:none;cursor:pointer;transition:color .25s;text-transform:uppercase;letter-spacing:.3px;min-width:48px;text-align:center;opacity:.7}",
+    ".toggle-option.active{color:var(--vscode-button-foreground,#fff);opacity:1}",
     ".tag{display:inline-flex;align-items:center;gap:3px;padding:1px 6px;color:var(--accent);border-radius:var(--r);font-size:10px;font-family:var(--mono);background:color-mix(in srgb,currentColor 12%,transparent);border:1px solid color-mix(in srgb,currentColor 35%,transparent);font-weight:700}",
     ".tag-base{display:inline-flex;align-items:center;gap:4px;padding:1px 6px;background:transparent;color:var(--fg);border-radius:var(--r);font-size:10px;font-family:var(--mono);border:1px dashed var(--border);cursor:pointer;opacity:.75;transition:opacity .1s,border-color .1s,color .1s}",
     ".tag-base:hover{opacity:1;border-color:var(--accent);color:var(--accent)}",
+    "#filter-row{padding:8px 8px 6px;border-bottom:1px solid var(--border);background:var(--bg)}",
     "#pills{display:flex;flex-wrap:wrap;gap:3px}",
-    "#action-row{display:flex;gap:4px;align-items:center;flex-wrap:wrap}",
     "#mascot{padding:6px 8px 4px;display:flex;align-items:center;gap:7px;border-bottom:1px solid var(--border);flex-shrink:0;position:relative;overflow:hidden}",
     "#mascot .dots{position:absolute;right:0;top:0;width:50px;height:100%;background-image:radial-gradient(circle,var(--border) 1px,transparent 1px);background-size:6px 6px;opacity:.3;pointer-events:none}",
     ".m-text{font-size:10px;font-family:var(--mono);opacity:.85;line-height:1.5}",
@@ -811,6 +975,8 @@ function buildHtml(webview, extensionUri) {
     ".s-A{color:var(--c-add)}",
     ".s-D{color:var(--c-del)}",
     ".s-R{color:var(--c-ren)}",
+    ".s-U{color:#ff6b6b;font-weight:900;animation:pulse 2s ease-in-out infinite}",
+    "@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}",
     ".fname{font-size:11px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}",
     ".fdir{font-size:10px;opacity:.5;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:2px}",
     ".cat{font-size:10px;padding:0 4px;border-radius:2px;font-family:var(--mono);border:1px solid var(--border);opacity:.6;text-transform:uppercase;line-height:13px;flex-shrink:0}",
@@ -824,6 +990,7 @@ function buildHtml(webview, extensionUri) {
     ".dh-status-A{color:var(--c-add)}",
     ".dh-status-D{color:var(--c-del)}",
     ".dh-status-R{color:var(--c-ren)}",
+    ".dh-status-U{color:#ff6b6b;font-weight:900;animation:pulse 2s ease-in-out infinite}",
     ".dh-counts{display:flex;gap:4px;font-size:10px;font-family:var(--mono)}",
     ".dh-add{color:var(--c-add)}",
     ".dh-del{color:var(--c-del)}",
@@ -844,7 +1011,7 @@ function buildHtml(webview, extensionUri) {
     ".d-err{color:var(--c-del)}",
     ".dt{border-collapse:collapse;table-layout:auto;min-width:100%}",
     '.dt td{vertical-align:top;padding:0 6px;white-space:pre;font-size:11px;font-family:var(--mono,"Courier New",monospace)}',
-    ".dt .ln{width:32px;min-width:32px;text-align:right;opacity:.35;user-select:none;padding-right:5px;padding-left:4px;border-right:1px solid var(--border);font-size:10px;white-space:nowrap!important}",
+    ".dt .ln{width:32px;text-align:right;opacity:.35;user-select:none;padding-right:5px;padding-left:4px;border-right:1px solid var(--border);font-size:10px;white-space:nowrap!important}",
     ".dt tr.ins td{background:var(--ins)}",
     ".dt tr.del td{background:var(--del)}",
     ".dt tr.hunk td{background:color-mix(in srgb,var(--accent) 8%,transparent);color:var(--accent);font-size:10px;padding:1px 8px;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}",
@@ -855,18 +1022,21 @@ function buildHtml(webview, extensionUri) {
     ".dt.wrap td:last-child{white-space:pre-wrap!important;word-break:break-all;overflow-wrap:anywhere}",
     "#empty-state{padding:24px 12px;text-align:center;font-size:11px;font-family:var(--mono);opacity:.6;line-height:1.8}",
     "#err-box{padding:10px 12px;font-size:11px;font-family:var(--mono);color:#dc5050;background:rgba(220,80,80,.08);border:1px solid rgba(220,80,80,.2);border-radius:var(--r);margin:8px;line-height:1.6}",
-    "#search-row{display:flex;gap:6px;margin-top:8px;align-items:center}",
-    "#select-all-wrapper{display:flex;align-items:center;gap:4px;padding:0 4px}",
+    "#control-row{padding:6px 8px 8px;border-bottom:1px solid var(--border);background:var(--bg);display:flex;gap:8px;align-items:center}",
+    "#search-wrapper{display:flex;align-items:center;gap:6px;background:var(--vscode-input-background);border:1.5px solid var(--border);border-radius:var(--r);padding:5px 10px;transition:border-color .15s}",
+    "#search-wrapper:focus-within{border-color:var(--accent);box-shadow:0 0 0 1px rgba(79,193,255,.2)}",
+    "#search-input{flex:1;padding:0;font-size:13px;background:transparent;color:var(--vscode-input-foreground);border:none;font-family:var(--mono)}",
+    "#search-input::placeholder{color:var(--vscode-input-placeholderForeground);opacity:.8}",
+    "#search-input:focus{outline:none}",
+    "#select-row{padding:6px 8px;border-bottom:1px solid var(--border);background:var(--bg);display:flex;gap:8px;align-items:center}",
+    "#select-all-wrapper{display:flex;align-items:center;gap:6px;padding:0 2px}",
     "#select-all{appearance:none;width:16px;height:16px;border:1px solid var(--vscode-checkbox-border);border-radius:3px;cursor:pointer;position:relative;transition:all .15s;background:var(--vscode-checkbox-background)}",
-    "#select-all:hover{border-color:var(--vscode-checkbox-border)}",
+    "#select-all:hover{border-color:var(--vscode-checkbox-border);transform:scale(1.05)}",
     "#select-all:checked{background:var(--vscode-checkbox-selectBackground);border-color:var(--vscode-checkbox-selectBorder)}",
     "#select-all:checked::after{content:'';position:absolute;left:4.5px;top:1px;width:4px;height:8px;border:solid var(--vscode-checkbox-foreground);border-width:0 2px 2px 0;transform:rotate(45deg)}",
-    "#select-count{font-size:10px;font-family:var(--mono);color:var(--fg);opacity:.6}",
-    "#search-input{flex:1;padding:5px 8px;font-size:12px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1.5px solid var(--border);border-radius:var(--r);font-family:var(--mono)}",
-    "#search-input::placeholder{color:var(--vscode-input-placeholderForeground);opacity:.8}",
-    "#search-input:focus{outline:1px solid var(--accent);outline-offset:-1px}",
-    ".action-btn{padding:5px 12px;font-size:11px;font-weight:600;border:1px solid var(--accent);background:var(--accent);color:var(--vscode-button-foreground,#fff);border-radius:var(--r);cursor:pointer;font-family:var(--mono);transition:all .15s;white-space:nowrap}",
-    ".action-btn:hover{background:var(--vscode-button-hoverBackground,var(--accent));opacity:.9}",
+    "#select-count{font-size:11px;font-family:var(--mono);color:var(--accent);font-weight:600;min-width:36px}",
+    ".action-btn{padding:5px 12px;font-size:11px;font-weight:700;border:none;background:var(--accent);color:var(--vscode-button-foreground,#fff);border-radius:var(--r);cursor:pointer;font-family:var(--mono);transition:all .15s;white-space:nowrap;box-shadow:0 2px 4px rgba(79,193,255,.3)}",
+    ".action-btn:hover{background:var(--vscode-button-hoverBackground,var(--accent));transform:translateY(-1px);box-shadow:0 3px 6px rgba(79,193,255,.4)}",
     ".action-btn:active{transform:scale(.98)}",
     ".action-btn:disabled{opacity:.4;cursor:not-allowed}",
     ".fname mark{background:var(--vscode-editor-findMatchHighlightBackground,rgba(234,92,0,.33));color:inherit;padding:0;border-radius:2px}",
@@ -910,9 +1080,13 @@ function buildHtml(webview, extensionUri) {
     "<body>\n" +
     '<div id="toolbar">\n' +
     '  <div id="branch-row">\n' +
-    '    <button class="btn ghost sm" id="btn-mode" title="Toggle: compare branch vs working tree changes"><span class="ico">&#x21CC;</span>BRANCH</button>\n' +
+    '    <div class="mode-toggle" id="mode-toggle">\n' +
+    '      <div class="toggle-bg" id="toggle-bg"></div>\n' +
+    '      <button class="toggle-option active" data-mode="branch" id="btn-branch">BRANCH</button>\n' +
+    '      <button class="toggle-option" data-mode="local" id="btn-local">LOCAL</button>\n' +
+    "    </div>\n" +
     '    <span class="tag" id="t-branch">...</span>\n' +
-    '    <span style="opacity:.4;font-size:10px" id="vs-sep">vs</span>\n' +
+    '    <span style="opacity:.8;font-size:10px" id="vs-sep">&#x21CC;</span>\n' +
     '    <span class="tag-base" id="t-base" title="Click to change base branch">&#x270E; main</span>\n' +
     '    <span class="tag-base" id="t-local-target" style="display:none" title="Click to change compare target">&#x270E; HEAD</span>\n' +
     "  </div>\n" +
@@ -922,16 +1096,17 @@ function buildHtml(webview, extensionUri) {
     '  <div class="m-text"><span id="m-msg">scanning...</span><br><span class="m-count" id="m-count">0 files</span></div>\n' +
     '  <div class="dots"></div>\n' +
     "</div>\n" +
-    '  <div id="action-row">\n' +
+    '  <div id="filter-row">\n' +
     '    <div id="pills"></div>\n' +
-    '    <div style="flex:1"></div>\n' +
     "  </div>\n" +
-    '  <div id="search-row">\n' +
+    '  <div id="control-row">\n' +
     '    <div id="select-all-wrapper">\n' +
     '      <input type="checkbox" id="select-all" title="Select all filtered files" />\n' +
     '      <span id="select-count"></span>\n' +
     "    </div>\n" +
-    '    <input type="text" id="search-input" placeholder="Search files..." />\n' +
+    '    <div id="search-wrapper">\n' +
+    '      <input type="text" id="search-input" placeholder="Search files..." />\n' +
+    "    </div>\n" +
     '    <button class="action-btn" id="btn-open-selected" title="Open selected files">Open</button>\n' +
     "  </div>\n" +
     "</div>\n" +
@@ -980,28 +1155,75 @@ function activate(context) {
       async () => {
         const cwd = getCwd();
         const config = vscode.workspace.getConfiguration("pixelBranchDiff");
-        const res = await run("git branch --format=%(refname:short)", cwd);
-        const branches = res.ok
-          ? res.out
+
+        // QuickPick 먼저 생성 및 표시
+        const qp = vscode.window.createQuickPick();
+        qp.title = "Base Branch 선택";
+        qp.placeholder = "비교 기준 브랜치를 선택하세요 (검색 가능)";
+        qp.busy = true;
+        qp.show();
+
+        // 백그라운드에서 로컬 + 원격 브랜치 로딩
+        const localRes = await run("git branch --format=%(refname:short)", cwd);
+        const remoteRes = await run(
+          "git for-each-ref --format='%(refname:short)' refs/remotes/",
+          cwd,
+        );
+
+        const localBranches = localRes.ok
+          ? localRes.out
               .split("\n")
               .map((b) => b.trim())
               .filter(Boolean)
           : [];
+
+        const remoteBranches = remoteRes.ok
+          ? remoteRes.out
+              .split("\n")
+              .map((b) => b.trim().replace(/^'|'$/g, "")) // 따옴표 제거
+              .filter(Boolean)
+              .filter((b) => !b.endsWith("/HEAD")) // origin/HEAD 제외
+          : [];
+
+        console.log(
+          "[Pixel Branch Diff] Local branches:",
+          localBranches.length,
+        );
+        console.log(
+          "[Pixel Branch Diff] Remote branches:",
+          remoteBranches.length,
+        );
+        console.log(
+          "[Pixel Branch Diff] Remote sample:",
+          remoteBranches.slice(0, 3),
+        );
+
+        // 로컬 우선, 원격은 뒤에
+        const allBranches = [...localBranches, ...remoteBranches];
+
         const current =
           config.get("baseBranch") || (await getDefaultBranch(cwd));
-        const picked = await vscode.window.showQuickPick(branches, {
-          title: "Base Branch 선택",
-          placeHolder: "비교 기준 브랜치를 선택하세요",
-          activeItems: [current],
+
+        // 아이템 설정
+        qp.items = allBranches.map((b) => ({ label: b }));
+        qp.activeItems = qp.items.filter((item) => item.label === current);
+        qp.busy = false;
+
+        // 선택 처리
+        qp.onDidAccept(async () => {
+          const picked = qp.selectedItems[0];
+          if (picked) {
+            await config.update(
+              "baseBranch",
+              picked.label,
+              vscode.ConfigurationTarget.Workspace,
+            );
+            provider.refresh();
+          }
+          qp.dispose();
         });
-        if (picked !== undefined) {
-          await config.update(
-            "baseBranch",
-            picked,
-            vscode.ConfigurationTarget.Workspace,
-          );
-          provider.refresh();
-        }
+
+        qp.onDidHide(() => qp.dispose());
       },
     ),
   );
@@ -1012,32 +1234,60 @@ function activate(context) {
       async () => {
         const cwd = getCwd();
         const config = vscode.workspace.getConfiguration("pixelBranchDiff");
-        const res = await run("git branch --format=%(refname:short)", cwd);
-        const branches = res.ok
-          ? res.out
+
+        // QuickPick 먼저 생성 및 표시
+        const qp = vscode.window.createQuickPick();
+        qp.title = "LOCAL 모드 비교 대상 선택";
+        qp.placeholder = "어떤 브랜치와 비교할까요? (검색 가능)";
+        qp.busy = true;
+        qp.show();
+
+        // 백그라운드에서 로컬 + 원격 브랜치 로딩
+        const localRes = await run("git branch --format=%(refname:short)", cwd);
+        const remoteRes = await run(
+          "git for-each-ref --format='%(refname:short)' refs/remotes/",
+          cwd,
+        );
+
+        const localBranches = localRes.ok
+          ? localRes.out
               .split("\n")
               .map((b) => b.trim())
               .filter(Boolean)
           : [];
 
-        // HEAD 옵션 추가
-        const options = ["HEAD", ...branches];
+        const remoteBranches = remoteRes.ok
+          ? remoteRes.out
+              .split("\n")
+              .map((b) => b.trim().replace(/^'|'$/g, ""))
+              .filter(Boolean)
+              .filter((b) => !b.endsWith("/HEAD"))
+          : [];
+
+        // HEAD 옵션 추가 + 로컬 + 원격
+        const options = ["HEAD", ...localBranches, ...remoteBranches];
         const current = config.get("localCompareTarget") || "HEAD";
 
-        const picked = await vscode.window.showQuickPick(options, {
-          title: "LOCAL 모드 비교 대상 선택",
-          placeHolder: "어떤 브랜치와 비교할까요?",
-          activeItems: [current],
+        // 아이템 설정
+        qp.items = options.map((o) => ({ label: o }));
+        qp.activeItems = qp.items.filter((item) => item.label === current);
+        qp.busy = false;
+
+        // 선택 처리
+        qp.onDidAccept(async () => {
+          const picked = qp.selectedItems[0];
+          if (picked) {
+            await config.update(
+              "localCompareTarget",
+              picked.label,
+              vscode.ConfigurationTarget.Workspace,
+            );
+            provider.refresh();
+          }
+          qp.dispose();
         });
 
-        if (picked !== undefined) {
-          await config.update(
-            "localCompareTarget",
-            picked,
-            vscode.ConfigurationTarget.Workspace,
-          );
-          provider.refresh();
-        }
+        qp.onDidHide(() => qp.dispose());
       },
     ),
   );
