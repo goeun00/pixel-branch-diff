@@ -8,6 +8,7 @@ const execAsync = util.promisify(exec);
 let _isGitRepo = null;
 let _refreshTimer = null;
 let _isRefreshing = false;
+let _contextFilePath = null;
 let _state = {
   mode: "compareBase",
   baseBranch: null,
@@ -82,6 +83,33 @@ function makeGitUri(absPath, ref) {
   return vscode.Uri.parse(
     `git:${fileUri.path}?${encodeURIComponent(JSON.stringify({ path: absPath, ref }))}`,
   );
+}
+
+function getContextFilePath(context) {
+  if (context && typeof context.filePath === "string") {
+    return context.filePath;
+  }
+
+  if (typeof _contextFilePath === "string") {
+    return _contextFilePath;
+  }
+
+  return null;
+}
+
+function getWorkspaceFileUri(filePath) {
+  const cwd = getCwd();
+  if (!cwd || !filePath) return null;
+
+  const absPath = path.resolve(cwd, filePath);
+  const relPath = path.relative(cwd, absPath);
+
+  // webview context 값은 사용자 입력처럼 취급해서 workspace 밖으로 나가지 않게 막는다.
+  if (relPath.startsWith("..") || path.isAbsolute(relPath)) {
+    return null;
+  }
+
+  return vscode.Uri.file(absPath);
 }
 
 // ── Git ───────────────────────────────────────────────────────────────────────
@@ -535,6 +563,13 @@ class PixelBranchDiffProvider {
 
     webviewView.webview.onDidReceiveMessage(async (msg) => {
       const cwd = getCwd();
+
+      if (msg.type === "setContextFile") {
+        _contextFilePath =
+          typeof msg.filePath === "string" ? msg.filePath : null;
+        return;
+      }
+
       let mode = _state.mode;
       let baseBranch = _state.baseBranch;
 
@@ -982,9 +1017,9 @@ function buildHtml(webview, extensionUri) {
     "#empty-state{padding:24px 12px;text-align:center;font-size:11px;font-family:var(--mono);opacity:.6;line-height:1.8}",
     "#err-box{padding:10px 12px;font-size:11px;font-family:var(--mono);color:#dc5050;background:rgba(220,80,80,.08);border:1px solid rgba(220,80,80,.2);border-radius:var(--r);margin:8px;line-height:1.6}",
     "#control-row{padding:6px 8px 8px;border-bottom:1px solid var(--border);background:var(--bg);display:flex;gap:8px;align-items:center;justify-content: space-between}",
-    "#search-wrapper{display:flex;align-items:center;gap:6px;background:var(--vscode-input-background);border:1.5px solid var(--border);border-radius:var(--r);padding:5px 10px;transition:border-color .15s;;flex-grow:1}",
+    "#search-wrapper{display:flex;align-items:center;gap:6px;background:var(--vscode-input-background);border:1.5px solid var(--border);border-radius:var(--r);padding:5px 10px;transition:border-color .15s;;flex-grow:1;  min-width: 0;}",
     "#search-wrapper:focus-within{border-color:var(--accent);box-shadow:0 0 0 1px rgba(79,193,255,.2)}",
-    "#search-input{flex:1;padding:0;font-size:13px;background:transparent;color:var(--vscode-input-foreground);border:none;font-family:var(--mono)}",
+    "#search-input{flex:1;padding:0;font-size:11px;background:transparent;color:var(--vscode-input-foreground);border:none;font-family:var(--mono)}",
     "#search-input::placeholder{color:var(--vscode-input-placeholderForeground);opacity:.8}",
     "#search-input:focus{outline:none}",
     "#select-row{padding:6px 8px;border-bottom:1px solid var(--border);background:var(--bg);display:flex;gap:8px;align-items:center}",
@@ -1105,6 +1140,82 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand("pixelBranchDiff.refresh", () =>
       provider.refresh(),
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "pixelBranchDiff.copyFileName",
+      async (contextValue) => {
+        const filePath = getContextFilePath(contextValue);
+
+        if (!filePath) {
+          vscode.window.showWarningMessage("복사할 파일명을 찾을 수 없어요.");
+          return;
+        }
+
+        await vscode.env.clipboard.writeText(path.basename(filePath));
+        vscode.window.showInformationMessage("파일명을 복사했어요.");
+      },
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "pixelBranchDiff.copyRelativePath",
+      async (contextValue) => {
+        const filePath = getContextFilePath(contextValue);
+        const fileUri = getWorkspaceFileUri(filePath);
+
+        if (!fileUri || !filePath) {
+          vscode.window.showWarningMessage(
+            "복사할 상대 경로를 찾을 수 없어요.",
+          );
+          return;
+        }
+
+        await vscode.env.clipboard.writeText(filePath);
+        vscode.window.showInformationMessage("상대 경로를 복사했어요.");
+      },
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "pixelBranchDiff.copyAbsolutePath",
+      async (contextValue) => {
+        const filePath = getContextFilePath(contextValue);
+        const fileUri = getWorkspaceFileUri(filePath);
+
+        if (!fileUri) {
+          vscode.window.showWarningMessage(
+            "복사할 절대 경로를 찾을 수 없어요.",
+          );
+          return;
+        }
+
+        await vscode.env.clipboard.writeText(fileUri.fsPath);
+        vscode.window.showInformationMessage("절대 경로를 복사했어요.");
+      },
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "pixelBranchDiff.revealInExplorer",
+      async (contextValue) => {
+        const filePath = getContextFilePath(contextValue);
+        const fileUri = getWorkspaceFileUri(filePath);
+
+        if (!fileUri) {
+          vscode.window.showWarningMessage(
+            "탐색기에서 열 파일을 찾을 수 없어요.",
+          );
+          return;
+        }
+
+        await vscode.commands.executeCommand("revealFileInOS", fileUri);
+      },
     ),
   );
 

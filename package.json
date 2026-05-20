@@ -2,7 +2,7 @@
   "name": "pixel-branch-diff-explorer",
   "displayName": "Pixel Branch Diff Explorer",
   "description": "Show changed files of current git branch in a cute retro pixel UI with inline diff viewer",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -46,6 +46,26 @@
       {
         "command": "pixelBranchDiff.toggleMode",
         "title": "Pixel Diff: Toggle Mode (Branch/Working Tree)"
+      },
+      {
+        "command": "pixelBranchDiff.copyFileName",
+        "title": "파일명 복사",
+        "icon": "$(symbol-string)"
+      },
+      {
+        "command": "pixelBranchDiff.copyRelativePath",
+        "title": "상대 경로 복사",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "pixelBranchDiff.copyAbsolutePath",
+        "title": "절대 경로 복사",
+        "icon": "$(clippy)"
+      },
+      {
+        "command": "pixelBranchDiff.revealInExplorer",
+        "title": "탐색기에서 열기",
+        "icon": "$(folder-opened)"
       }
     ],
     "menus": {
@@ -54,6 +74,28 @@
           "command": "pixelBranchDiff.refresh",
           "when": "view == pixelBranchDiff.explorerView",
           "group": "navigation"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "pixelBranchDiff.copyFileName",
+          "when": "webviewId == 'pixelBranchDiff.explorerView' && webviewSection == 'fileItem'",
+          "group": "1_file@1"
+        },
+        {
+          "command": "pixelBranchDiff.copyRelativePath",
+          "when": "webviewId == 'pixelBranchDiff.explorerView' && webviewSection == 'fileItem'",
+          "group": "1_file@2"
+        },
+        {
+          "command": "pixelBranchDiff.copyAbsolutePath",
+          "when": "webviewId == 'pixelBranchDiff.explorerView' && webviewSection == 'fileItem'",
+          "group": "1_file@3"
+        },
+        {
+          "command": "pixelBranchDiff.revealInExplorer",
+          "when": "webviewId == 'pixelBranchDiff.explorerView' && webviewSection == 'fileItem'",
+          "group": "2_open@1"
         }
       ]
     }

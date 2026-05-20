@@ -253,6 +253,14 @@
       var isSel = state.sel && state.sel.filePath === f.filePath;
       var isChecked = state.selectedFiles.indexOf(f.filePath) !== -1;
       item.className = "fi" + (isSel ? " sel" : "");
+      item.setAttribute(
+        "data-vscode-context",
+        JSON.stringify({
+          webviewSection: "fileItem",
+          filePath: f.filePath,
+          preventDefaultContextMenuItems: true,
+        }),
+      );
 
       var basename = f.filePath.split("/").pop();
       var dir = f.filePath.split("/").slice(0, -1).join("/");
@@ -328,6 +336,13 @@
         ev.stopPropagation();
         checkbox.checked = !checkbox.checked;
         checkbox.dispatchEvent(new Event("change"));
+      });
+
+      item.addEventListener("contextmenu", function () {
+        vscode.postMessage({
+          type: "setContextFile",
+          filePath: f.filePath,
+        });
       });
 
       item.addEventListener("click", function (ev) {
