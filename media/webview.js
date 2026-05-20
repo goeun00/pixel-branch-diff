@@ -457,17 +457,15 @@
     });
 
     var statusText =
-      status === "U"
-        ? "CONFLICT"
-        : status === "A"
-          ? "ADDED"
-          : status === "D"
-            ? "DELETED"
-            : status === "R"
-              ? isModified
-                ? "RENAMED+MOD"
-                : "RENAMED"
-              : "MODIFIED";
+      status === "A"
+        ? "ADDED"
+        : status === "D"
+          ? "DELETED"
+          : status === "R"
+            ? isModified
+              ? "RENAMED+MOD"
+              : "RENAMED"
+            : "MODIFIED";
 
     var statusCls =
       "dh-status dh-status-" +

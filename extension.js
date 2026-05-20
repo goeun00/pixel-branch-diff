@@ -7,6 +7,7 @@ const execAsync = util.promisify(exec);
 
 let _isGitRepo = null;
 let _refreshTimer = null;
+let _isRefreshing = false;
 let _state = {
   mode: "compareBase",
   baseBranch: null,
@@ -166,38 +167,17 @@ async function getChangedFiles(
   if (mode === "workingTree") {
     // HEAD와 비교할 때는 git status 사용
     if (localCompareTarget === "HEAD") {
-      // 1. 먼저 충돌 파일 확인
-      const conflictRes = await run(
-        "git diff --name-only --diff-filter=U",
-        cwd,
-      );
-      const conflictFiles =
-        conflictRes.ok && conflictRes.out
-          ? conflictRes.out.split("\n").filter((f) => f.trim())
-          : [];
-
-      console.log("[DEBUG] Conflict files:", conflictFiles);
-
       const res = await run("git status --porcelain", cwd);
       if (!res.ok) return { error: "git status failed: " + res.err };
-      if (!res.out && conflictFiles.length === 0) return { files: [] };
-
-      console.log("[DEBUG] git status output:");
-      console.log(res.out);
-      console.log("[DEBUG] Total lines:", res.out.split("\n").length);
-
-      const conflictSet = new Set(conflictFiles);
+      if (!res.out) return { files: [] };
 
       for (const line of res.out.split("\n")) {
         if (!line.trim()) continue;
         const x = line[0];
         const y = line[1];
 
-        console.log(`[DEBUG] Line: "${line}" | X="${x}" Y="${y}"`);
-
         // ignored 파일만 제외
         if (x === "!") {
-          console.log(`[DEBUG] Skipped (ignored)`);
           continue;
         }
 
@@ -205,31 +185,11 @@ async function getChangedFiles(
         // "M  file.js" → "file.js"
         // " M file.js" → "file.js"
         // "?? file.js" → "file.js"
-        // "UU file.js" → "file.js" (충돌)
         const raw = line.substring(2).trimStart();
         let status = "M";
 
-        // 충돌 파일 체크 (git diff --diff-filter=U 결과 우선)
-        if (conflictSet.has(raw)) {
-          status = "U";
-          console.log(`[DEBUG] ⚠️ CONFLICT (from git diff): "${raw}"`);
-        }
-        // 충돌 파일 (Unmerged) - Git의 모든 충돌 상태
-        else if (
-          x === "U" ||
-          y === "U" ||
-          (x === "D" && y === "D") ||
-          (x === "A" && y === "A") ||
-          (x === "A" && y === "U") ||
-          (x === "U" && y === "D") ||
-          (x === "U" && y === "A") ||
-          (x === "D" && y === "U")
-        ) {
-          status = "U"; // 충돌 상태
-          console.log(`[DEBUG] ⚠️ CONFLICT (from status): "${raw}" (${x}${y})`);
-        }
         // Untracked 파일
-        else if (x === "?") {
+        if (x === "?") {
           status = "A"; // 추가된 파일로 표시
         }
         // Y(working tree)를 우선 체크, 없으면 X(staged)를 사용
@@ -261,9 +221,6 @@ async function getChangedFiles(
             );
 
             const filesInDir = stdout.trim().split("\n").filter(Boolean);
-            console.log(
-              `[DEBUG] Found ${filesInDir.length} files in ${dirPath}`,
-            );
 
             for (const relFile of filesInDir) {
               files.push({
@@ -272,12 +229,9 @@ async function getChangedFiles(
                 oldPath: null,
                 category: extCategory(relFile),
               });
-              console.log(`[DEBUG] Added (from dir): ${status} ${relFile}`);
             }
           } catch (err) {
             // 폴더 접근 실패 시 에러 자세히 로깅
-            console.log(`[DEBUG] Cannot expand directory: ${dirPath}`);
-            console.log(`[DEBUG] Error: ${err.message}`);
             files.push({
               status,
               filePath,
@@ -293,10 +247,8 @@ async function getChangedFiles(
             oldPath,
             category: extCategory(filePath),
           });
-          console.log(`[DEBUG] Added: ${status} ${filePath}`);
         }
       }
-      console.log(`[DEBUG] Total files found: ${files.length}`);
       return { files, compareTarget: localCompareTarget };
     } else {
       // 다른 브랜치와 로컬 변경사항 비교
@@ -306,10 +258,6 @@ async function getChangedFiles(
         return { error: "git status failed: " + statusRes.err };
       if (!statusRes.out)
         return { files: [], compareTarget: localCompareTarget };
-
-      console.log(
-        `[DEBUG] Comparing local changes against: ${localCompareTarget}`,
-      );
 
       // 2단계: 각 변경된 파일을 처리
       for (const line of statusRes.out.split("\n")) {
@@ -719,9 +667,6 @@ class PixelBranchDiffProvider {
           ...allRemote,
         ];
 
-        console.log("[Pixel Branch Diff] Local branches:", allLocal.length);
-        console.log("[Pixel Branch Diff] Remote branches:", allRemote.length);
-
         // 로딩 완료 - UI 업데이트
         qp.busy = false;
         qp.placeholder =
@@ -857,8 +802,6 @@ class PixelBranchDiffProvider {
         await this._sendData(cwd, newMode, baseBranch);
       }
     });
-
-    setTimeout(() => this.refresh(), 600);
   }
 
   async _sendData(cwd, mode, baseBranch) {
@@ -866,11 +809,22 @@ class PixelBranchDiffProvider {
 
     const localTarget = _state.localCompareTarget || "HEAD";
 
+    if (!cwd) {
+      this._view.webview.postMessage({
+        type: "data",
+        branch: "(no workspace)",
+        mode,
+        baseBranch: baseBranch || "main",
+        localTarget,
+        files: [],
+        error: "No workspace folder open.",
+      });
+      return;
+    }
+
     const [branch, result] = await Promise.all([
-      cwd ? getCurrentBranch(cwd) : Promise.resolve("(no workspace)"),
-      cwd
-        ? getChangedFiles(cwd, mode, baseBranch, localTarget)
-        : Promise.resolve({ error: "No workspace folder open." }),
+      getCurrentBranch(cwd),
+      getChangedFiles(cwd, mode, baseBranch, localTarget),
     ]);
 
     this._view.webview.postMessage({
@@ -878,26 +832,33 @@ class PixelBranchDiffProvider {
       branch,
       mode,
       baseBranch: baseBranch || "main",
-      localTarget: localTarget,
+      localTarget,
       ...result,
     });
   }
 
   async refresh() {
-    if (!this._view) return;
-    const cwd = getCwd();
+    if (!this._view || _isRefreshing) return;
 
-    if (!_state.baseBranch && cwd) {
-      const detectedBase = await getDefaultBranch(cwd);
-      if (detectedBase) _state.baseBranch = detectedBase;
+    _isRefreshing = true;
+
+    try {
+      const cwd = getCwd();
+
+      if (!_state.baseBranch && cwd) {
+        const detectedBase = await getDefaultBranch(cwd);
+        if (detectedBase) _state.baseBranch = detectedBase;
+      }
+
+      if (!_state.localCompareTarget) {
+        _state.localCompareTarget = "HEAD";
+      }
+
+      this._view.webview.postMessage({ type: "loading" });
+      await this._sendData(cwd, _state.mode, _state.baseBranch);
+    } finally {
+      _isRefreshing = false;
     }
-
-    if (!_state.localCompareTarget) {
-      _state.localCompareTarget = "HEAD";
-    }
-
-    this._view.webview.postMessage({ type: "loading" });
-    await this._sendData(cwd, _state.mode, _state.baseBranch);
   }
 }
 // ── HTML Builder ──────────────────────────────────────────────────────────────
@@ -975,7 +936,6 @@ function buildHtml(webview, extensionUri) {
     ".s-A{color:var(--c-add)}",
     ".s-D{color:var(--c-del)}",
     ".s-R{color:var(--c-ren)}",
-    ".s-U{color:#ff6b6b;font-weight:900;animation:pulse 2s ease-in-out infinite}",
     "@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}",
     ".fname{font-size:11px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}",
     ".fdir{font-size:10px;opacity:.5;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:2px}",
@@ -990,7 +950,6 @@ function buildHtml(webview, extensionUri) {
     ".dh-status-A{color:var(--c-add)}",
     ".dh-status-D{color:var(--c-del)}",
     ".dh-status-R{color:var(--c-ren)}",
-    ".dh-status-U{color:#ff6b6b;font-weight:900;animation:pulse 2s ease-in-out infinite}",
     ".dh-counts{display:flex;gap:4px;font-size:10px;font-family:var(--mono)}",
     ".dh-add{color:var(--c-add)}",
     ".dh-del{color:var(--c-del)}",
@@ -1022,8 +981,8 @@ function buildHtml(webview, extensionUri) {
     ".dt.wrap td:last-child{white-space:pre-wrap!important;word-break:break-all;overflow-wrap:anywhere}",
     "#empty-state{padding:24px 12px;text-align:center;font-size:11px;font-family:var(--mono);opacity:.6;line-height:1.8}",
     "#err-box{padding:10px 12px;font-size:11px;font-family:var(--mono);color:#dc5050;background:rgba(220,80,80,.08);border:1px solid rgba(220,80,80,.2);border-radius:var(--r);margin:8px;line-height:1.6}",
-    "#control-row{padding:6px 8px 8px;border-bottom:1px solid var(--border);background:var(--bg);display:flex;gap:8px;align-items:center}",
-    "#search-wrapper{display:flex;align-items:center;gap:6px;background:var(--vscode-input-background);border:1.5px solid var(--border);border-radius:var(--r);padding:5px 10px;transition:border-color .15s}",
+    "#control-row{padding:6px 8px 8px;border-bottom:1px solid var(--border);background:var(--bg);display:flex;gap:8px;align-items:center;justify-content: space-between}",
+    "#search-wrapper{display:flex;align-items:center;gap:6px;background:var(--vscode-input-background);border:1.5px solid var(--border);border-radius:var(--r);padding:5px 10px;transition:border-color .15s;;flex-grow:1}",
     "#search-wrapper:focus-within{border-color:var(--accent);box-shadow:0 0 0 1px rgba(79,193,255,.2)}",
     "#search-input{flex:1;padding:0;font-size:13px;background:transparent;color:var(--vscode-input-foreground);border:none;font-family:var(--mono)}",
     "#search-input::placeholder{color:var(--vscode-input-placeholderForeground);opacity:.8}",
@@ -1184,19 +1143,6 @@ function activate(context) {
               .filter(Boolean)
               .filter((b) => !b.endsWith("/HEAD")) // origin/HEAD 제외
           : [];
-
-        console.log(
-          "[Pixel Branch Diff] Local branches:",
-          localBranches.length,
-        );
-        console.log(
-          "[Pixel Branch Diff] Remote branches:",
-          remoteBranches.length,
-        );
-        console.log(
-          "[Pixel Branch Diff] Remote sample:",
-          remoteBranches.slice(0, 3),
-        );
 
         // 로컬 우선, 원격은 뒤에
         const allBranches = [...localBranches, ...remoteBranches];
